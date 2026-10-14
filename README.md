@@ -1,41 +1,82 @@
-# Discord Remote Agents for DSH — Windows restricted preview
+# Discord Remote Agents
 
-## npm公開準備中
+**Discordから、PCのDSHで開いている会話を続けるプラグインです。**
 
-package名は `dsh-discord-remote-agents`、versionは `0.2.0-restricted.3`。npmレジストリ公開後はDSHの **Plugins → プラグイン追加** に `dsh-discord-remote-agents@preview` と指定できます。**現在はnpm認証待ちで未公開です。** `npm publish --dry-run`の成功を公開済みとは扱いません。
+既存のSessionを選び、指示を送って、進捗と結果を確認できます。新しいSessionの作成と、完了時の本人向けDM通知にも対応しています。
 
-旧 `@local/dsh-discord-remote-agents` を導入済みなら先にreceiverを停止し、そのbundleを無効化してから移行してください。二重receiverは起動しないでください。保存領域やデータの自動削除・移行はしません。
+> **開発プレビューです。** 実際のDSHへの導入・画面表示・Discordとの往復はまだ検証できていません。動作確認済みの完成版ではありません。
 
-それまでは、DSHの **Plugins → プラグイン追加** に次の公開GitHubアドレスを入力します。
+## 必要なもの
+
+- Windows上で動作するDSHと、利用可能なモデル。契約の調査対象はDSH **0.2.0-rc.2**です。
+- 自分が管理するDiscordサーバーとBot。
+- 導入時のインターネット接続。実行環境はNode.js **22.23.0以上**が必要です。
+
+## 1. DSHに追加する
+
+DSHの **Plugins → プラグイン追加** に、次を入力します。
 
 ```text
 github:git-haya-ora/dsh-discord-remote-agents
 ```
 
-このリポジトリは配布専用です。直下のpackage.jsonにDSH bundle／Client宣言があり、必要なJavaScriptと保護helperをビルド済みで含みます。利用者のビルド、ローカルtarball、開発リポジトリへのアクセスは不要です。固定revisionで導入したい場合はアドレス末尾に `#` と確認した完全なcommit SHAを付けてください。
+導入結果を確認してDSHの画面を再読み込みし、このプラグインの設定を開きます。再起動を求められた場合は、実行中の作業を終えてから通常の方法で再起動してください。
 
-**実DSHへの導入・画面表示・実Discord往復は未検証です。** GitHub取得や単体試験の成功を実機動作保証とはしません。契約調査対象はDSH 0.2.0-rc.2、Windows、Node >=22.23.0です。依存discord.js 14.27.0の取得にインターネットが必要です。
+ソースのダウンロード・ビルド・設定ファイルの編集は不要です。上の指定は最新版を取得します。版を固定したい場合だけ、末尾に `#コミットSHA` を付けます。
 
-## 初回設定
+**npmレジストリ版はまだ未公開です。** 公開後の指定名は `dsh-discord-remote-agents@preview` です。現在は上のGitHub指定を使ってください。
 
-1. インストール結果のHost activationとClient synchronizationを確認し、同じDSH画面を再読み込みしてplugin設定を開きます。再起動が必要なら、作業が安全に終わってから通常の方法で再起動してください。
-2. サーバーID、Application ID、許可User ID、許可Channel ID、作業フォルダー名と絶対パスを指定します。DiscordのIDコピーには「ユーザー設定 → 詳細設定 → 開発者モード」を使います。まず自分だけを許可してください。
-3. Discord Developer Portalで新規発行したBot tokenを設定画面のpassword欄だけに入力し、**設定を保存 → Discordにコマンドを追加 → 接続を開始**の順に進めます。保存時にBotを検証するため別のTokenテストは任意です。保存だけでは接続しません。
-4. Botを自分のサーバーへ招待してください。scopeは `bot` と `applications.commands`。管理者権限・Message Content intentは不要です。tokenを会話やIssueへ貼らないでください。
+旧 `@local/dsh-discord-remote-agents` を使っていた場合は、先にその接続を停止してプラグインを無効にしてください。新旧を同時に動かさないでください。
 
-## 普段の操作
+## 2. Discord Botを用意する
 
-許可したチャンネルで `/agent sessions` → `/agent bind session:ID` → `/agent prompt text:指示` → `/agent result`。IDと指示は実際の値に置き換えます。進み具合は `/agent status`、新規作業は `/agent new workspace:main`。完了通知は本人DMです。DM失敗でも指示を再送せず `/agent result` を確認します。選択先はチャンネル共有で、送信済み指示の行き先は後から変わりません。
+1. [Discord Developer Portal](https://discord.com/developers/applications)でApplicationとBotを作成します。
+2. **Application ID**を控え、Botの画面で**Bot token**を発行します。tokenは後でDSHの設定画面に入力します。
+3. OAuth2の招待URLで `bot` と `applications.commands` を選び、自分のサーバーへBotを招待します。使うチャンネルを閲覧・送信できる権限を付けてください。管理者権限とMessage Content Intentは不要です。
+4. Discordの **ユーザー設定 → 詳細設定 → 開発者モード** を有効にします。サーバー、自分のユーザー、使うチャンネルをそれぞれ右クリックしてIDをコピーします。
 
-## 必ず守る制限
+**tokenをチャットやIssueに貼らないでください。** 一度でも公開したtokenは再発行してください。
 
-- 認証済みDSH GUIの単一operatorを信頼します。別owner/admin権限はありません。ログイン済みDSHを他人と共有しないでください。
-- 同じSessionをPCとDiscordで**交互に**使ってください。Desktopとの同時送信は原子的に排除できません。旧CLIや別receiverとの同時運用も避けてください。
-- 承認、実行停止、添付、ArtifactはPCのDSHで操作します。pluginの停止はDiscord接続だけを止めます。
-- 結果不明の指示・通知は自動再送しません。unknownならPCで元のSessionを確認してください。
-- tokenは同じWindows利用者のCurrentUser DPAPIで保護し、読み戻しUIや平文fallbackはありません。保存領域のACLやlogging policyが安全検査に通らなければ停止します。権限を緩めたり、DBを削除して再送したりしないでください。
-- 許可フォルダーはOSサンドボックスではありません。pluginはDSHの実行権限を持ちます。詳しくは[セキュリティ](<SECURITY.md>)を確認してください。
+## 3. DSHで設定して接続する
 
-## 配布の検査
+プラグインの設定画面に、次を入力します。
 
-`MANIFEST.sha256`は実行ファイル等38件のSHA256一覧です。秘密やlocal設定を持たない配布専用の新規履歴として公開しています。checksumは完全性確認用であり、第三者の安全性保証や署名ではありません。自動更新・DSHへの自動インストールは行いません。
+| 項目 | 入力するもの |
+|---|---|
+| Bot token | 発行したtoken。パスワード欄にだけ入力 |
+| Application ID | Developer PortalからコピーしたID |
+| サーバーID | Botを招待したサーバーのID |
+| 許可ユーザーID | まずは自分のIDだけ |
+| 許可チャンネルID | Botを使うチャンネルのID。スレッドならスレッド自体のID |
+| 作業フォルダー | 名前は `main` で構いません。パスにはPC上の既存フォルダーの絶対パスを指定 |
+
+**設定を保存 → Discordにコマンドを追加 → 接続を開始** の順に進めます。保存だけでは接続しません。
+
+tokenは送信時に入力欄から消えます。保存済みtokenを表示する機能はありません。以後、token欄を空にして保存すれば、保存済みのtokenをそのまま使います。
+
+## 普段の使い方
+
+許可したチャンネルで操作します。`ID`と`指示`は実際の値に置き換えてください。
+
+| やりたいこと | コマンド |
+|---|---|
+| 既存のSessionを見る | `/agent sessions` |
+| 続けるSessionを選ぶ | `/agent bind session:ID` |
+| 指示を送る | `/agent prompt text:指示` |
+| 進み具合を見る | `/agent status` |
+| 途中出力・結果を見る | `/agent result` |
+| 新しいSessionを作る | `/agent new workspace:main` |
+
+Sessionの選択はチャンネル内で共有されます。完了時には指示を送った本人へDMで通知します。DMが届かなくても、指示を再送せず `/agent result` で確認してください。
+
+## 制限と困ったとき
+
+- **PCとDiscordは同じSessionを交互に使ってください。** 同時送信の完全な排他は保証できません。
+- **承認・実行停止・添付ファイルの操作はPC側で行います。** プラグインの「停止」はDiscord接続を止めるだけで、DSHの実行は止めません。
+- **`unknown`は受付・配信の成否を確定できない状態です。** 自動再送はしません。PCで元のSessionを確認し、データベースを消して再送しないでください。
+- **`minimumReleaseAge`で導入が止まる場合**は、DSH側の依存パッケージ待機制限です。npm方式への変更でも解消しません。制限を無効にして進めないでください。
+- **設定の保存や権限の検査で止まる場合**は、安全確認に失敗しています。保存領域の権限を無理に緩めないでください。
+
+このプラグインはPCのDSH実行権限を使います。許可する相手は信頼できる人だけにしてください。許可フォルダーの設定はOSのサンドボックスではありません。tokenはWindowsのCurrentUser DPAPIで保護しますが、会話や結果に含まれる秘密をすべて検出できるわけではありません。
+
+詳しい安全上の制約は[セキュリティ方針](<SECURITY.md>)を参照してください。このリポジトリはビルド済みファイルの配布用です。[配布ファイルのSHA256一覧](<MANIFEST.sha256>)は内容の照合用で、安全性を保証する署名ではありません。
