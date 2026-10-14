@@ -1,6 +1,12 @@
 # Discord Remote Agents for DSH — Windows restricted preview
 
-DSHの **Plugins → プラグイン追加** に次の公開GitHubアドレスを入力します。
+## npm公開準備中
+
+package名は `dsh-discord-remote-agents`、versionは `0.2.0-restricted.3`。npmレジストリ公開後はDSHの **Plugins → プラグイン追加** に `dsh-discord-remote-agents@preview` と指定できます。**現在はnpm認証待ちで未公開です。** `npm publish --dry-run`の成功を公開済みとは扱いません。
+
+旧 `@local/dsh-discord-remote-agents` を導入済みなら先にreceiverを停止し、そのbundleを無効化してから移行してください。二重receiverは起動しないでください。保存領域やデータの自動削除・移行はしません。
+
+それまでは、DSHの **Plugins → プラグイン追加** に次の公開GitHubアドレスを入力します。
 
 ```text
 github:git-haya-ora/dsh-discord-remote-agents

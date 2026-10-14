@@ -1,11 +1,11 @@
 // DSH Client settings surface. Host calls stay on the authenticated Connection RPC;
 // secrets are write-only inputs and never enter browser storage or package config.
 window.__ModuleLoader__.load({
-  id: '@local/dsh-discord-remote-agents',
+  id: 'dsh-discord-remote-agents',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
-    const PACKAGE = '@local/dsh-discord-remote-agents';
+    const PACKAGE = 'dsh-discord-remote-agents';
     const NAMESPACE = 'discordRemoteAgents.settings';
     const CHANNEL = '/discord-remote-agents';
     const STATES = new Set(['unconfigured', 'stopped', 'connecting', 'connected', 'blocked', 'disposed']);
