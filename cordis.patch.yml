@@ -1,0 +1,4 @@
+- insert:
+    - id: discord-remote-agents
+      name: '@local/dsh-discord-remote-agents'
+      config: {}
