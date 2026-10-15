@@ -1,0 +1,10 @@
+{
+  "allowedUserIds": ["YOUR_DISCORD_USER_ID"],
+  "guildId": "YOUR_DISCORD_SERVER_ID",
+  "allowedChannelIds": ["YOUR_DISCORD_CHANNEL_OR_THREAD_ID"],
+  "allowedWorkspaces": {
+    "project-a": "C:\\Users\\YOUR_NAME\\Projects\\project-a"
+  },
+  "pollIntervalMs": 5000,
+  "databasePath": "data/bot.sqlite"
+}

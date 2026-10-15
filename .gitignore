@@ -1,0 +1,24 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+config.json
+telegram.config.json
+data/
+.research/
+*.log
+.local/
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.dpapi
+*.secrets.json
+*.credential
+*.bak
+# Generated restricted bundle runtime and local distribution artifacts
+packages/discord-plugin/runtime/
+*.tgz
+.verification/
+.contract-type-check/

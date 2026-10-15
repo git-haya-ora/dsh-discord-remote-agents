@@ -65,8 +65,8 @@ export class Store {
         if (run.bodyMissing)
             this.bodies.delete(run.id);
         else
-            this.bodies.set(run.id, { output: run.output, result: run.result });
-        return JSON.stringify({ ...run, output: '', result: '', bodyMissing: true });
+            this.bodies.set(run.id, { output: run.output, result: run.result, finalText: run.finalText });
+        return JSON.stringify({ ...run, output: '', result: '', finalText: undefined, bodyMissing: true });
     }
     allRuns() { return this.db.prepare('SELECT payload FROM runs ORDER BY rowid').all().map(row => this.decode(row)); }
     compareSetting(key, previous, value) {
@@ -89,10 +89,49 @@ export class Store {
         const value = this.db.prepare('SELECT session_id FROM bindings WHERE key=?').get(key)?.session_id;
         return typeof value === 'string' ? value : undefined;
     }
-    bind(key, sessionId) {
-        this.db.prepare('INSERT INTO bindings(key,session_id) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET session_id=excluded.session_id').run(key, sessionId);
+    bindingVersion(key) {
+        const raw = this.setting(`binding-version:${key}`) ?? '0';
+        const value = Number(raw);
+        if (!/^(0|[1-9][0-9]*)$/u.test(raw) || !Number.isSafeInteger(value))
+            throw new AppError('DB_CORRUPT', 'Binding versionを確認できません。');
+        return value;
     }
-    unbind(key) { this.db.prepare('DELETE FROM bindings WHERE key=?').run(key); }
+    bind(key, sessionId, expectedVersion, unique = false) {
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+            const version = this.bindingVersion(key);
+            if (version === Number.MAX_SAFE_INTEGER)
+                throw new AppError('BINDING_VERSION_EXHAUSTED', 'Binding version上限です。記録を保全してください。');
+            if (expectedVersion !== undefined && version !== expectedVersion)
+                throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+            if (unique && this.db.prepare('SELECT key FROM bindings WHERE session_id=? AND key<>? LIMIT 1').get(sessionId, key))
+                throw new AppError('SESSION_BOUND', 'このSessionは別の会話で選択されています。先に明示解除してください。');
+            this.db.prepare('INSERT INTO bindings(key,session_id) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET session_id=excluded.session_id').run(key, sessionId);
+            this.setSetting(`binding-version:${key}`, String(this.bindingVersion(key) + 1));
+            this.db.exec('COMMIT');
+        }
+        catch (error) {
+            this.db.exec('ROLLBACK');
+            throw error;
+        }
+    }
+    unbind(key, expectedVersion) {
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+            const version = this.bindingVersion(key);
+            if (version === Number.MAX_SAFE_INTEGER)
+                throw new AppError('BINDING_VERSION_EXHAUSTED', 'Binding version上限です。記録を保全してください。');
+            if (expectedVersion !== undefined && version !== expectedVersion)
+                throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+            this.db.prepare('DELETE FROM bindings WHERE key=?').run(key);
+            this.setSetting(`binding-version:${key}`, String(this.bindingVersion(key) + 1));
+            this.db.exec('COMMIT');
+        }
+        catch (error) {
+            this.db.exec('ROLLBACK');
+            throw error;
+        }
+    }
     get(id) { return this.decode(this.db.prepare('SELECT payload FROM runs WHERE id=?').get(id)); }
     decode(row) {
         if (!row)
@@ -104,11 +143,13 @@ export class Store {
                 if (body) {
                     run.output = body.output;
                     run.result = body.result;
+                    run.finalText = body.finalText;
                     delete run.bodyMissing;
                 }
                 else {
                     run.output = '';
                     run.result = '';
+                    delete run.finalText;
                     run.bodyMissing = true;
                 }
             }
@@ -127,6 +168,16 @@ export class Store {
         }
     }
     save(run) {
+        const row = this.db.prepare('SELECT payload FROM runs WHERE id=?').get(run.id);
+        const current = row ? JSON.parse(String(row.payload)) : undefined;
+        const revision = current?.revision ?? 0;
+        if (!Number.isSafeInteger(revision) || revision < 0)
+            throw new AppError('DB_CORRUPT', 'Run revisionを確認できません。');
+        if (!current || revision !== (run.revision ?? 0))
+            throw new AppError('RUN_REVISION_CONFLICT', '実行情報が更新されました。再確認してください。');
+        if (revision === Number.MAX_SAFE_INTEGER)
+            throw new AppError('RUN_VERSION_EXHAUSTED', 'Run revision上限です。記録を保全してください。');
+        run.revision = revision + 1;
         this.db.prepare('UPDATE runs SET state=?,payload=? WHERE id=?').run(run.state, this.encode(run), run.id);
     }
     active() {
@@ -141,7 +192,21 @@ export class Store {
             .map(row => this.decode(row)).find(run => run.guildId === guildId && run.channelId === channelId);
     }
     recoverDispatches() {
-        for (const run of this.active()) {
+        for (const run of this.allRuns()) {
+            if (run.delivery) {
+                let changed = false;
+                for (const part of run.delivery.parts)
+                    if (part.state === 'sending') {
+                        part.state = 'unknown';
+                        part.lastError = 'RESTART_DURING_DELIVERY';
+                        changed = true;
+                    }
+                if (changed) {
+                    run.notification = 'unknown';
+                    run.lastError = 'NOTIFICATION_UNKNOWN';
+                    this.save(run);
+                }
+            }
             if (run.state === 'dispatching') {
                 run.state = 'unknown';
                 run.lastError = 'RESTART_DURING_DISPATCH';

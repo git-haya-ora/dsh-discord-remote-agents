@@ -1,11 +1,17 @@
 {
   "name": "dsh-discord-remote-agents",
-  "version": "0.2.0-restricted.3",
+  "version": "0.2.0-restricted.4",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/build-plugin.mjs && node scripts/sync-distribution.mjs",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "pack:plugin": "npm run build && npm pack --ignore-scripts",
+    "verify:source": "node tools/verify-public-source.mjs"
+  },
+  "devDependencies": { "@types/node": "22.19.15", "typescript": "5.9.3" },
   "description": "Single-operator Discord text bridge for DSH; approvals, cancellation, attachments, artifacts, and atomic desktop coordination are unavailable",
-  "private": false,
+  "private": true,
   "license": "UNLICENSED",
   "repository": { "type": "git", "url": "git+https://github.com/git-haya-ora/dsh-discord-remote-agents.git" },
-  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/", "tag": "preview" },
   "type": "module",
   "exports": { ".": { "types": "./index.d.ts", "default": "./index.js" }, "./contracts": "./contracts.ts", "./client": "./client.js", "./protected-run-outbox": { "types": "./protected-run-outbox.d.ts", "default": "./protected-run-outbox.js" }, "./protected-payloads": { "types": "./protected-payloads.d.ts", "default": "./protected-payloads.js" }, "./run-outbox-journal": { "types": "./run-outbox-journal.d.ts", "default": "./run-outbox-journal.js" }, "./outbox-journal": { "types": "./outbox-journal.d.ts", "default": "./outbox-journal.js" }, "./admission-journal": { "types": "./admission-journal.d.ts", "default": "./admission-journal.js" }, "./native-admission": { "types": "./native-admission.d.ts", "default": "./native-admission.js" }, "./discord-components": { "types": "./discord-components.d.ts", "default": "./discord-components.js" }, "./secret-journal": { "types": "./secret-journal.d.ts", "default": "./secret-journal.js" }, "./windows-secrets": { "types": "./windows-secrets.d.ts", "default": "./windows-secrets.js" } },
   "files": ["runtime/", "host-runtime.js", "host-runtime.d.ts", "native-adapter.js", "protected-run-outbox.js", "protected-run-outbox.d.ts", "protected-payloads.js", "protected-payloads.d.ts", "protected-payloads.ps1", "client.js", "run-outbox-journal.js", "run-outbox-journal.d.ts", "outbox-journal.js", "outbox-journal.d.ts", "admission-journal.js", "admission-journal.d.ts", "native-admission.js", "native-admission.d.ts", "index.js", "index.d.ts", "contracts.ts", "cordis.patch.yml", "windows-secrets.js", "windows-secrets.d.ts", "windows-secrets.ps1", "secret-journal.js", "secret-journal.d.ts", "discord-components.js", "discord-components.d.ts"],

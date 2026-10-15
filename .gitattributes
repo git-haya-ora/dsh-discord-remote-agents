@@ -1,0 +1,15 @@
+* text=auto
+*.ts text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.env.example text eol=lf
+.gitignore text eol=lf
+*.ps1 text eol=lf
+packages/discord-plugin/windows-secrets.ps1 text eol=lf
+packages/discord-plugin/protected-payloads.ps1 text eol=lf
+MANIFEST.sha256 text eol=lf
+.gitattributes text eol=lf

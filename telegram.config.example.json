@@ -1,0 +1,9 @@
+{
+  "allowedUserIds": ["123456789"],
+  "allowedChatIds": ["123456789"],
+  "allowedWorkspaces": {
+    "project-a": "C:\\Users\\YOUR_NAME\\Projects\\project-a"
+  },
+  "pollIntervalMs": 5000,
+  "databasePath": "data/bot.sqlite"
+}
