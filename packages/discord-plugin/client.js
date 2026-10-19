@@ -7,7 +7,8 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
     const PACKAGE = 'dsh-discord-remote-agents';
     const NAMESPACE = 'discordRemoteAgents.settings';
-    const CHANNEL = '/discord-remote-agents';
+    const CHANNEL = '/api';
+    const ENDPOINT = 'discord-remote-agents.manage';
     const STATES = new Set(['unconfigured', 'stopped', 'connecting', 'connected', 'blocked', 'disposed']);
     const CSS = `
 .dra-root{box-sizing:border-box;width:100%;max-width:760px;color:var(--dsw-alias-label-primary);font:inherit;line-height:1.5}
@@ -64,6 +65,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
 `;
     const dictionaries = {
       en: {
+        connectionNoticeWarning: 'Connection-notice delivery could not be confirmed. Check the receiver state above separately. The notice is not retried automatically.', connectionNoticeTitle: 'Connection notifications', connectionNoticeHelp: 'Optional, off by default. Sent once after a receiver start succeeds. Includes selected Session/project names and observed model metadata, never folder paths. Failure does not reconnect or retry.', connectionNoticeDm: 'Send to every allowed user by DM', connectionNoticeChannels: 'Publish to every allowed channel (visible to its members)',
         stepSave: "1 Save settings",
         stepCommands: "2 Add commands to Discord",
         stepStart: "3 Start connection",
@@ -72,7 +74,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         folder: "Absolute folder path",
         addWorkspace: "Add folder",
         removeWorkspace: "Remove folder",
-        workspaceHelp: "Choose a short name; enter an existing absolute folder path on this PC. Folder access is not an OS sandbox.",
+        workspaceHelp: "Optional: leave empty to connect first. After connecting, use /agent workspace-add in Discord to allow an existing folder, then select a Session. Folder access is not an OS sandbox. Command paths are sent to Discord; never include secrets.",
         idHelp: "Discord → User Settings → Advanced → Developer Mode. Right-click the server, user or channel → Copy ID.",
         appHelp: "Discord Developer Portal → your application → General Information → Application ID.",
         requiredId: "Enter a numeric Discord ID.",
@@ -98,6 +100,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         noStatus: 'Host status is unavailable. Refresh before making changes.', loadFailed: 'Could not load Host status. No settings were changed.', connectionUnavailable: 'The authenticated DSH connection is unavailable.', operationFailed: 'The Host rejected the operation.', resultUnknown: 'The result could not be confirmed. The operation was not retried; refresh status before acting again.', invalidWorkspaces: 'Enter each workspace as alias=absolute-path on its own line.', testSuccess: 'Discord token test succeeded for ', testFailed: 'Discord token test failed.', saved: 'Settings saved.', started: 'Receiver started.', stopped: 'Receiver stopped.', reconnected: 'Reconnect requested.', commandsRegistered: 'Command registration completed.', secretDeleted: 'Stored token deleted.', unexpected: 'The Host returned an unexpected response.', busy: 'An operation is already in progress.',
       },
       zh: {
+        connectionNoticeWarning: '无法确认连接通知是否送达。请另外查看上方接收器状态。不会自动重发通知。', connectionNoticeTitle: '连接通知', connectionNoticeHelp: '可选，默认关闭。每次接收器成功启动后发送一次，包含已选 Session/项目名称与观测模型信息，不含文件夹路径。发送失败不会重连或重试。', connectionNoticeDm: '向每个允许用户发送私信', connectionNoticeChannels: '公开发送至每个允许频道（频道成员可见）',
         stepSave: "1 保存设置",
         stepCommands: "2 向 Discord 添加命令",
         stepStart: "3 启动连接",
@@ -106,7 +109,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         folder: "文件夹绝对路径",
         addWorkspace: "添加文件夹",
         removeWorkspace: "移除文件夹",
-        workspaceHelp: "填写简短名称和本机已有文件夹的绝对路径。文件夹许可不是 OS 沙箱。",
+        workspaceHelp: "可选，可以留空后先连接。在 Discord 用 /agent workspace-add 许可本机已有文件夹，再选择 Session。文件夹许可不是 OS 沙箱。命令路径会发送给 Discord，请勿包含秘密。",
         idHelp: "Discord → 用户设置 → 高级 → 开发者模式。右键服务器、用户或频道 → 复制 ID。",
         appHelp: "Discord Developer Portal → 你的应用 → General Information → Application ID。",
         requiredId: "请输入数字 Discord ID。",
@@ -132,6 +135,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         noStatus: '无法获取 Host 状态。请先刷新，再进行更改。', loadFailed: '无法读取 Host 状态。未更改任何设置。', connectionUnavailable: '已认证的 DSH 连接不可用。', operationFailed: 'Host 拒绝了此操作。', resultUnknown: '无法确认操作结果。没有重试；再次操作前请刷新状态。', invalidWorkspaces: '请按每行 alias=绝对路径 的格式填写工作区。', testSuccess: 'Discord token 测试成功：', testFailed: 'Discord token 测试失败。', saved: '设置已保存。', started: '接收器已启动。', stopped: '接收器已停止。', reconnected: '已请求重新连接。', commandsRegistered: '命令注册已完成。', secretDeleted: '已删除保存的 token。', unexpected: 'Host 返回了非预期结果。', busy: '已有操作正在进行。',
       },
       ja: {
+        connectionNoticeWarning: '接続通知の送達を確認できません。接続そのものの成否は上の状態をご確認ください。通知の自動再送はしません。', connectionNoticeTitle: '接続できたことをDiscordへ通知', connectionNoticeHelp: '任意・初期状態はオフです。Receiverの接続成功ごとに1回送ります。選択済みのプロジェクト・Session名と観測したモデルを含み、フォルダーのパスは送りません。両方を選ぶと両方へ送信します。通知失敗では再接続・自動再送しません。', connectionNoticeDm: '使う人全員へ本人DMで通知する', connectionNoticeChannels: '使うチャンネル全てへ公開する（そのチャンネルの参加者にも見えます）',
         stepSave: "1 設定を保存",
         stepCommands: "2 Discordにコマンドを追加",
         stepStart: "3 接続を開始",
@@ -140,7 +144,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         folder: "フォルダーの絶対パス",
         addWorkspace: "フォルダーを追加",
         removeWorkspace: "フォルダーを除く",
-        workspaceHelp: "短い名前と、このPCにあるフォルダーの絶対パスを入力してください。フォルダー許可はOSのサンドボックスではありません。",
+        workspaceHelp: "任意です。空欄のまま接続できます。接続後にDiscordの /agent workspace-add で既存フォルダーを許可し、Sessionを選んでください。フォルダー許可はOS sandboxではありません。コマンドのパスはDiscordへ送られるため、秘密の文字列は含めないでください。",
         idHelp: "Discord → ユーザー設定 → 詳細設定 → 開発者モードをオン。サーバー・ユーザー・チャンネルを右クリック → IDをコピー。",
         appHelp: "Discord Developer Portal → 対象アプリ → General Information → Application IDをコピー。",
         requiredId: "数字のDiscord IDを入力してください。",
@@ -151,12 +155,12 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         discard: "未保存の変更を破棄",
         optionalTest: "任意です。保存時にもTokenを確認するので、事前テストは不要です。入力したTokenは送信直後に消去されます。",
         commandsNote: "Hostにはコマンド登録状態の保存がありません。初回設定・コマンド更新時は設定保存後に登録してください。",
-        useHelp: "許可したDiscordチャンネルで /agent sessions → /agent bind session:<一覧のID> → /agent prompt text:<指示> → /agent result。<>は実際の値に置換してください。承認はこのPCで対応します。",
+        useHelp: "フォルダー未設定なら許可チャンネルで /agent workspace-add alias:main path:<PCの絶対パス> confirm-access:true → /agent new workspace:main → /agent prompt text:<指示>。既存Sessionは /agent sessions → /agent bind session:<ID>。結果は /agent result。<>は実際の値に置換。承認はこのPCで対応します。",
         title: 'DiscordからDSHを使う', intro: '設定を保存し、コマンドを追加してから接続します。保存だけでは接続しません。',
         singleOperator: 'このDSHを使える人が管理できます', singleOperatorBody: 'ユーザー別の管理権限は分かれていません。ログイン済みのDSHを他人と共有しないでください。',
         scope: 'PCとDiscordは交互に使ってください', scopeBody: '同じSessionへの同時送信は防げません。PCで実行中はDiscordから送信しないでください。結果不明の指示は再送せずPCで確認します。承認・実行停止・添付・成果物はPCのDSHで扱います。',
         statusTitle: 'Receiver状態', refresh: '状態を更新', refreshing: '更新中…', state: '状態', state_unconfigured: '未設定', state_stopped: '停止', state_connecting: '接続中', state_connected: '接続済み', state_blocked: 'ブロック', state_disposed: '破棄済み', tokenState: 'Bot token', tokenSet: 'Hostに保存済み', tokenMissing: '未設定', bot: 'Discord bot', notReported: '未報告',
-        settingsTitle: 'Discord設定', settingsHelp: '使うサーバー・人・チャンネルと、PCの作業フォルダーを指定します。初回は下のBot tokenも入力して保存してください。', guildId: 'サーバーID', applicationId: 'Application ID', allowedUsers: '使う人のユーザーID（まず自分だけ）', allowedChannels: '使うチャンネルのID', onePerLine: 'IDをコピーして1行に1つ入力してください。', workspaces: '作業フォルダー', workspacesHint: 'alias=絶対パスを1行ずつ入力。例: main=C:\\Work\\repo', autoStart: 'Host起動時にReceiverを起動', autoStartHelp: '自動起動は初期状態でオフです。保存済みの現在の版で明示的に確認した開始が成功した後だけ、今後のHost起動に有効になります。保存・停止・Token削除で解除されます。', confirmAutoStart: '今後のHost再起動時にReceiverを自動起動することに明示的に同意します。', autoStartConsentRequired: '保存前に自動起動を明示的に確認してください。',
+        settingsTitle: 'Discord設定', settingsHelp: '使うサーバー・人・チャンネルを指定します。作業フォルダーは任意で、接続後にDiscordから追加できます。初回は下のBot tokenも入力して保存してください。', guildId: 'サーバーID', applicationId: 'Application ID', allowedUsers: '使う人のユーザーID（まず自分だけ）', allowedChannels: '使うチャンネルのID', onePerLine: 'IDをコピーして1行に1つ入力してください。', workspaces: '作業フォルダー（任意）', workspacesHint: 'alias=絶対パスを1行ずつ入力。例: main=C:\\Work\\repo', autoStart: 'Host起動時にReceiverを起動', autoStartHelp: '自動起動は初期状態でオフです。保存済みの現在の版で明示的に確認した開始が成功した後だけ、今後のHost起動に有効になります。保存・停止・Token削除で解除されます。', confirmAutoStart: '今後のHost再起動時にReceiverを自動起動することに明示的に同意します。', autoStartConsentRequired: '保存前に自動起動を明示的に確認してください。',
         tokenTitle: 'Bot token — 書き込み専用', tokenHelp: '空欄なら保存済みTokenを維持します。入力値はHostにのみ送信され、この画面では読み戻し・保存しません。', tokenPlaceholder: '保存済みTokenを置き換える場合のみ入力', testToken: 'Tokenをテスト', testing: 'テスト中…', testHint: '入力値をテストします。空欄の場合は保存済みTokenをテストします。',
         save: '設定を保存', saving: '保存中…', start: '接続を開始', stop: 'Discord接続を停止', reconnect: '再接続', receiverControls: '接続操作', startHelp: '接続だけを操作します。PCで開始済みの実行は停止しません。', exclusiveControlHelp: '旧CLIや別のReceiverを同時に起動せず、PC実行中は送信しないでください。', confirmExclusive: '旧CLI/別receiverを停止済みで、PC実行中は送信しないことを確認します。',
         commandsTitle: 'Discordコマンド', commandsHelp: 'コマンド登録はDiscordアプリを変更します。続行前に明示的に確認してください。', confirmCommands: 'Discordアプリのコマンドを登録・更新することを確認します。', registerCommands: 'コマンドを登録', registering: '登録中…',
@@ -222,16 +226,19 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         applicationId: text(source.applicationId),
         allowedUserIds: list(source.allowedUserIds),
         allowedChannelIds: list(source.allowedChannelIds),
-        workspaces: Object.keys(workspaces).sort().flatMap(key => typeof workspaces[key] === 'string' ? [{ alias: key, path: workspaces[key] }] : []).concat(Object.keys(workspaces).length ? [] : [{ alias: 'main', path: '' }]),
+        workspaces: Object.keys(workspaces).sort().flatMap(key => typeof workspaces[key] === 'string' ? [{ alias: key, path: workspaces[key] }] : []).concat(Object.keys(workspaces).length ? [] : [{ alias: '', path: '' }]),
         autoStart: source.autoStart === true,
+        connectionDm: source.connectionNotifications?.dm === true,
+        connectionChannels: source.connectionNotifications?.channels === true,
       };
     }
     function parseWorkspaces(value) {
       const result = Object.create(null);
-      if (!Array.isArray(value) || !value.length || value.length > 32) return null;
+      if (!Array.isArray(value) || value.length > 32) return null;
       for (const row of value) {
         const alias = text(row.alias).trim();
         const path = text(row.path).trim();
+        if (!alias && !path) continue;
         if (!/^[a-zA-Z0-9_-]{1,40}$/u.test(alias) || !path || path.length > 1024 || /[\0\r\n]/u.test(path) || !/^(?:[A-Za-z]:[\\/]|[\\/])/u.test(path) || Object.hasOwn(result, alias)) return null;
         result[alias] = path;
       }
@@ -245,7 +252,10 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         ctx.effect(() => ctx.locale.register(NAMESPACE, { en: dictionaries.en, zh: dictionaries.zh }));
         ctx.effect(() => ctx.locale.register(NAMESPACE, 'ja', dictionaries.ja));
 
-        function SettingsPage({ t, view }) {
+        function SettingsPage({ t: translate, view }) {
+          // A page-local choice: never change DSH's global language or persist secrets.
+          const [language, setLanguage] = React.useState('system');
+          const t = key => language === 'system' ? translate(key) : dictionaries[language][key] || translate(key);
           const [status, setStatus] = React.useState(null);
           const [draft, setDraft] = React.useState(() => draftFrom(null));
           const [dirty, setDirty] = React.useState(false);
@@ -280,7 +290,8 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
           async function readStatus(signal) {
             const rpc = ctx.connection && ctx.connection.rpc;
             if (!rpc || typeof rpc.call !== 'function') throw new Error('unavailable');
-            const response = await rpc.call(CHANNEL, 'manage', { operation: 'status' }, signal);
+            const envelope = await rpc.call(CHANNEL, ENDPOINT, { operation: 'status' }, signal);
+            const response = envelope?.ok === true ? envelope.value : null;
             if (signal.aborted) return;
             if (!isRecord(response) || response.ok !== true || !applyStatus(response.value)) {
               setStatus(null);
@@ -349,7 +360,8 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                 setMessage({ kind: 'error', text: t('connectionUnavailable') });
                 return;
               }
-              const response = await rpc.call(CHANNEL, 'manage', request, controller.signal);
+              const envelope = await rpc.call(CHANNEL, ENDPOINT, request, controller.signal);
+              const response = envelope?.ok === true ? envelope.value : null;
               if (controller.signal.aborted) return;
               if (!isRecord(response) || typeof response.ok !== 'boolean') {
                 setMessage({ kind: 'error', text: t('unexpected') });
@@ -477,7 +489,14 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
             h('div', { className: 'dra-stack' },
               h('header', null,
                 h('h2', { className: 'dra-heading' }, t('title')),
-                h('p', { className: 'dra-copy' }, t('intro'))),
+                h('p', { className: 'dra-copy' }, t('intro')),
+                h('div', { className: 'dra-field', style: { maxWidth: 240, marginTop: 12 } },
+                  h('label', { className: 'dra-label', htmlFor: 'dra-language' }, '表示言語 / Language'),
+                  h('select', { id: 'dra-language', className: 'dra-control', value: language,
+                    onChange: event => { if (['system', 'ja', 'en', 'zh'].includes(event.target.value)) setLanguage(event.target.value); } },
+                    h('option', { value: 'system' }, 'DSHの設定 / Follow DSH'),
+                    h('option', { value: 'ja' }, '日本語'), h('option', { value: 'en' }, 'English'),
+                    h('option', { value: 'zh' }, '简体中文')))),
               h('div', { className: 'dra-notice' },
                 h('strong', null, t('singleOperator')),
                 h('p', null, t('singleOperatorBody'))),
@@ -500,6 +519,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                     allowedChannelIds: splitLines(draft.allowedChannelIds),
                     workspaces: workspaceMap,
                     autoStart: draft.autoStart === true,
+                    connectionNotifications: { dm: draft.connectionDm === true, channels: draft.connectionChannels === true },
                   },
                   ...(tokenInput.length > 0 ? { token: tokenInput } : {}),
                 });
@@ -522,6 +542,12 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                     h('span', { className: 'dra-hint', id: 'dra-workspaces-help' }, t('workspaceHelp')),
                     validation && errors.workspaces ? h('span', { className: 'dra-message', 'data-kind': 'error', id: 'dra-workspaces-error' }, errors.workspaces) : null,
                     h('button', { className: 'dra-button', type: 'button', disabled: busy, onClick: () => edit('workspaces', [...draft.workspaces, { alias: '', path: '' }]) }, t('addWorkspace')))),
+                h('fieldset', { className: 'dra-section', style: { borderLeft: 0, borderRight: 0, borderBottom: 0, margin: '14px 0 0', minWidth: 0 } },
+                  h('legend', { className: 'dra-section-title' }, t('connectionNoticeTitle')),
+                  h('p', { className: 'dra-hint', id: 'dra-connection-notice-help' }, t('connectionNoticeHelp')),
+                  h('div', { className: 'dra-stack', style: { gap: 8 } },
+                    checkbox(t('connectionNoticeDm'), draft.connectionDm, value => edit('connectionDm', value), 'dra-connection-dm'),
+                    checkbox(t('connectionNoticeChannels'), draft.connectionChannels, value => edit('connectionChannels', value), 'dra-connection-channels'))),
                 h('details', null, h('summary', { className: 'dra-section-title' }, t('advanced')),
                 h('div', { className: 'dra-actions' },
                   checkbox(t('autoStart'), draft.autoStart, value => { setConfirmAutoStart(false); edit('autoStart', value); }, 'dra-auto-start')),
@@ -560,7 +586,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                   h('button', { className: 'dra-button', type: 'button', 'data-kind': !unsaved && status && status.settings && status.tokenConfigured && state === 'stopped' ? 'primary' : undefined, disabled: !canStart, onClick: () => { if (!canStart) return; const request = revisionRequest('start', { confirmation: true }); if (request) { setConfirmExclusive(false); void invoke(request, 'start'); } } }, t('start')),
                   h('button', { className: 'dra-button', type: 'button', disabled: !canStop, onClick: () => { if (!canStop) return; setConfirmExclusive(false); const request = revisionRequest('stop'); if (request) void invoke(request, 'stop'); } }, t('stop'))),
                 h('p', { className: 'dra-hint' }, t('startHelp')),
-                 status && status.lastError ? h('p', { className: 'dra-message', 'data-kind': 'error' }, `${t('lastError')}: ${status.lastError}`) : null,
+                 status && status.lastError ? h('p', { className: 'dra-message', 'data-kind': 'error' }, status.lastError === 'CONNECTION_NOTICE_UNCONFIRMED' ? t('connectionNoticeWarning') : `${t('lastError')}: ${status.lastError}`) : null,
                  state === 'connected' ? h('p', { className: 'dra-copy' }, t('useHelp')) : null),
               h('details', { className: 'dra-section' }, h('summary', { className: 'dra-section-title' }, t('deleteTitle')),
                 h('p', { className: 'dra-copy' }, t('deleteHelp')),

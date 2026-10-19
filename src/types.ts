@@ -1,6 +1,8 @@
+export interface SessionModel { provider: string; model: string; reasoningEffort?: string }
 export interface SessionInfo {
   sessionId: string; cwd?: string; running: boolean; title: string;
   subagent: boolean; updatedAt: number;
+  lastUsedModel?: SessionModel; nextModel?: SessionModel;
 }
 export interface WireEvent { type: string; seq: number; time: number; data: Record<string, unknown>; surfaceOp?: unknown }
 export interface Snapshot { cursor: number; values: Record<string, unknown> }

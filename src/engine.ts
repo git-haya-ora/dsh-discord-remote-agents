@@ -10,6 +10,7 @@ export interface Actor { userId: string; guildId: string; channelId: string }
 export type Notify = (run: Run, part?: { index: number; content: string }) => Promise<void | { messageId: string }>;
 export class Engine {
   private ticking = false;
+  registerWorkspace?: (actor: Actor, alias: string, path: string, confirmed: boolean) => Promise<void>;
   constructor(readonly adapter: AgentAdapter, readonly store: Store, readonly policy: Policy, private readonly secrets: readonly string[] = [], readonly sharedDiscordBindings = false) {
     store.recoverDispatches();
   }
@@ -30,6 +31,14 @@ export class Engine {
   private key(actor: Actor): string { return bindingKey(actor.guildId, actor.channelId, this.sharedDiscordBindings && actor.guildId !== 'telegram' ? 'shared' : actor.userId); }
   binding(actor: Actor): string | undefined { return this.store.binding(this.key(actor)); }
   bindingVersion(actor: Actor): number { return this.store.bindingVersion(this.key(actor)); }
+  async selectedSession(actor: Actor): Promise<{ session: SessionInfo | undefined; bindingVersion: number }> {
+    this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+    const id = this.binding(actor), version = this.bindingVersion(actor);
+    const session = id ? await this.session(id, actor) : undefined;
+    this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+    if (this.binding(actor) !== id || this.bindingVersion(actor) !== version) throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+    return { session, bindingVersion: version };
+  }
   async bind(actor: Actor, sessionId: string, expectedVersion = this.bindingVersion(actor)): Promise<void> {
     this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
     await this.session(sessionId, actor);

@@ -9,6 +9,7 @@ export interface RestrictedSettings {
   allowedChannelIds: string[];
   workspaces: Record<string, string>;
   autoStart: boolean;
+  connectionNotifications?: { dm: boolean; channels: boolean };
 }
 export interface RestrictedCapabilities {
   text: boolean;

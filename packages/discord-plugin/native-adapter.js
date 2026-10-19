@@ -35,6 +35,20 @@ export class NativeSessionAdapter {
         title: typeof values.title === 'string' ? values.title : '(無題)',
         subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string' };
       if (typeof item.cwd === 'string') info.cwd = item.cwd;
+      // Official modelSelection wire view: lastUsed comes from request/header,
+      // next is pending intent (or lastUsed). Never call either an active Run model.
+      const selection = values.modelSelection;
+      const model = value => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+        const valid = text => typeof text === 'string' && text.length > 0 && text.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(text);
+        if (!valid(value.provider) || !valid(value.model) || value.reasoningEffort !== undefined && !valid(value.reasoningEffort)) return undefined;
+        return { provider: value.provider, model: value.model, ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }) };
+      };
+      if (selection && typeof selection === 'object' && !Array.isArray(selection)) {
+        const lastUsed = model(selection.lastUsed), next = model(selection.next);
+        if (lastUsed) info.lastUsedModel = lastUsed;
+        if (next) info.nextModel = next;
+      }
       return info;
     });
   }

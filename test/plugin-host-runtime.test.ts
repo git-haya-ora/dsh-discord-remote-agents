@@ -4,14 +4,16 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
+import type { Engine } from '../src/engine.js';
 const { DiscordHost, validateBot } = await import(new URL('../../packages/discord-plugin/host-runtime.js', import.meta.url).href) as typeof import('../packages/discord-plugin/host-runtime.js');
 const guildId = '222222222222222222', applicationId = '444444444444444444';
 const syntheticToken = 'synthetic.fixture.NOT-A-REAL-TOKEN';
-async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => Promise<void>) {
+async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => Promise<void>, noticeFailure = false, noticeGate?: Promise<{ sent: number; failed: number }>) {
   const root = await mkdtemp(join(tmpdir(), 'restricted-host-fixture-'));
   const store = new Store(':memory:', true), secrets = new Map<string, string>();
   let creates = 0, receiverCreates = 0, receiverStops = 0, failRetire = false;
-  const ctx = { effect() {}, connection: { rpc: { handle() { return () => {}; } } }, sessionController: {
+  let currentEngine: Engine | undefined; let noticeCalls = 0;
+  const ctx = { effect() {}, connection: { fetch: { register() { return () => {}; } } }, sessionController: {
     async list() { return { items: [] }; }, async create() {}, async page() {}, async projections() {}, async prompt() {}
   } };
   const host = new DiscordHost(ctx, { dataRoot: root }, {
@@ -22,12 +24,92 @@ async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => 
       async retire(ref: string) { if (failRetire) throw new Error(syntheticToken); secrets.delete(ref); }
     },
     fetcher: async (url: string) => new Response(JSON.stringify(url.endsWith('/users/@me') ? { id: applicationId, username: 'fixture', bot: true } : { id: applicationId, bot: { id: applicationId } }), { status: 200 }),
-    createBot: () => { receiverCreates++; let ready = false; return { client: { isReady: () => ready }, async start() { ready = true; }, async stop() { ready = false; receiverStops++; } }; }
+    createBot: (_config: unknown, engine: Engine) => { currentEngine = engine; receiverCreates++; let ready = false; return { client: { isReady: () => ready }, async start() { ready = true; }, async notifyConnected() { noticeCalls++; assert.equal(host.status().state, 'connected'); return noticeGate ?? { sent: noticeFailure ? 0 : 1, failed: noticeFailure ? 1 : 0 }; }, async stop() { ready = false; receiverStops++; } }; }
   });
   const settings = { guildId, applicationId, allowedUserIds: ['111111111111111111'], allowedChannelIds: ['333333333333333333'], workspaces: { fixture: root }, autoStart: false };
   t.after(async () => { await host.dispose(); await rm(root, { recursive: true, force: true }); });
-  return { host, store, secrets, settings, counts: () => ({ creates, receiverCreates, receiverStops }), failRetirement: () => { failRetire = true; } };
+  return { host, store, secrets, settings, noticeCalls: () => noticeCalls, engine: () => { assert.ok(currentEngine); return currentEngine; }, counts: () => ({ creates, receiverCreates, receiverStops }), failRetirement: () => { failRetire = true; } };
 }
+test('slow notice delivery does not block connected management status', { timeout: 5000 }, async t => {
+  let release!: (value: { sent: number; failed: number }) => void;
+  const gate = new Promise<{ sent: number; failed: number }>(resolve => { release = resolve; });
+  const f = await setup(t, undefined, false, gate);
+  assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings: f.settings, token: syntheticToken })).ok, true);
+  assert.equal((await f.host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true })).ok, true);
+  assert.equal((await f.host.dispatch({ operation: 'status' })).ok, true); assert.equal(f.host.status().state, 'connected');
+  release({ sent: 0, failed: 1 }); await gate; await Promise.resolve(); await Promise.resolve();
+  assert.equal(f.host.status().lastError, 'CONNECTION_NOTICE_UNCONFIRMED'); assert.equal(f.counts().receiverCreates, 1);
+});
+test('connection-notice failure preserves a successful receiver and never triggers reconnect', async t => {
+  const f = await setup(t, undefined, true);
+  const settings = { ...f.settings, connectionNotifications: { dm: true, channels: true } };
+  assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings, token: syntheticToken })).ok, true);
+  assert.equal((await f.host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true })).ok, true);
+  assert.equal(f.host.status().state, 'connected'); assert.equal(f.host.status().lastError, 'CONNECTION_NOTICE_UNCONFIRMED');
+  await f.host.dispatch({ operation: 'status' }); assert.equal(f.noticeCalls(), 1); assert.equal(f.counts().receiverCreates, 1); assert.equal(f.counts().receiverStops, 0);
+});
+test('malformed connection notice flags fail before token validation or persistence', async t => {
+  const f = await setup(t);
+  for (const flags of [null, [], { dm: true }, { dm: true, channels: 'true' }, { dm: true, channels: false, other: true }]) {
+    assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings: { ...f.settings, connectionNotifications: flags }, token: syntheticToken })).ok, false);
+  }
+  assert.equal(f.counts().creates, 0); assert.equal(f.host.status().revision, 0);
+});
+test('connect without folders, then explicitly register an existing folder without restarting or changing tokens', async t => {
+  const { host, settings, counts, secrets, engine: getEngine, store } = await setup(t);
+  const empty = { ...settings, workspaces: {} };
+  assert.equal((await host.dispatch({ operation: 'save', expectedRevision: 0, settings: empty, token: syntheticToken })).ok, true);
+  assert.equal((await host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true })).ok, true);
+  const engine = getEngine();
+  const actor = { userId: settings.allowedUserIds[0]!, guildId, channelId: settings.allowedChannelIds[0]! };
+  const add = engine.registerWorkspace!;
+  assert.equal(host.status().state, 'connected');
+  assert.equal(await engine.policy.allowsCwd(settings.workspaces.fixture, guildId), false);
+  await assert.rejects(add(actor, 'project', settings.workspaces.fixture, false));
+  await assert.rejects(add({ ...actor, userId: '999999999999999999' }, 'project', settings.workspaces.fixture, true));
+  await assert.rejects(add(actor, 'project', join(settings.workspaces.fixture, 'nonexistent'), true));
+  assert.equal(host.status().revision, 1);
+  await add(actor, 'project', settings.workspaces.fixture, true);
+  assert.equal(host.status().revision, 2);
+  assert.equal(host.status().settings!.workspaces.project, settings.workspaces.fixture);
+  assert.equal(await engine.policy.allowsCwd(settings.workspaces.fixture, guildId), true);
+  assert.equal(engine.policy.workspace('project', guildId), settings.workspaces.fixture);
+  assert.equal(engine.binding(actor), undefined); assert.equal(store.allRuns().length, 0);
+  assert.equal(host.status().state, 'connected'); assert.equal(secrets.size, 1);
+  assert.deepEqual(counts(), { creates: 1, receiverCreates: 1, receiverStops: 0 });
+  await assert.rejects(add(actor, 'project', settings.workspaces.fixture, true));
+  assert.equal(host.status().revision, 2);
+  assert.deepEqual(await host.dispatch({ operation: 'save', expectedRevision: 1, settings: empty }), { ok: false, code: 'REVISION_CONFLICT' });
+  assert.ok(!JSON.stringify(host.status()).includes(syntheticToken));
+});
+
+test('failed workspace persistence never grants directory access', async t => {
+  const { host, settings, store, engine: getEngine } = await setup(t);
+  await host.dispatch({ operation: 'save', expectedRevision: 0, settings: { ...settings, workspaces: {} }, token: syntheticToken });
+  await host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true });
+  const actor = { userId: settings.allowedUserIds[0]!, guildId, channelId: settings.allowedChannelIds[0]! };
+  const compare = store.compareSetting.bind(store);
+  store.compareSetting = () => false;
+  await assert.rejects(getEngine().registerWorkspace!(actor, 'project', settings.workspaces.fixture, true));
+  store.compareSetting = compare;
+  assert.equal(host.status().revision, 1);
+  assert.equal(await getEngine().policy.allowsCwd(settings.workspaces.fixture, guildId), false);
+});
+
+test('workspace storage read failure releases management ownership for a later explicit attempt', async t => {
+  const { host, settings, store, engine: getEngine } = await setup(t);
+  await host.dispatch({ operation: 'save', expectedRevision: 0, settings: { ...settings, workspaces: {} }, token: syntheticToken });
+  await host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true });
+  const actor = { userId: settings.allowedUserIds[0]!, guildId, channelId: settings.allowedChannelIds[0]! };
+  const read = store.setting.bind(store);
+  store.setting = () => { throw new Error('synthetic storage failure'); };
+  await assert.rejects(getEngine().registerWorkspace!(actor, 'project', settings.workspaces.fixture, true));
+  store.setting = read;
+  assert.equal(await getEngine().policy.allowsCwd(settings.workspaces.fixture, guildId), false);
+  await getEngine().registerWorkspace!(actor, 'project', settings.workspaces.fixture, true);
+  assert.equal(host.status().revision, 2);
+});
+
 test('management strict DTO, confirmation and revision fail before secret access', async t => {
   const { host, settings, counts } = await setup(t);
   for (const input of [{ operation: 'status', token: syntheticToken }, { operation: 'start', expectedRevision: 0 }, { operation: 'reconnect', expectedRevision: 0, confirmation: false }, { operation: 'save', expectedRevision: -1, settings, token: syntheticToken }]) {

@@ -11,6 +11,10 @@ export const command = new SlashCommandBuilder().setName('agent').setDescription
   .addSubcommand(c => c.setName('current').setDescription('現在のSessionと確認可能な設定を表示'))
   .addSubcommand(c => c.setName('workspaces').setDescription('許可済みWorkspace aliasをページ表示')
     .addIntegerOption(o => o.setName('page').setDescription('ページ番号（1から）').setMinValue(1).setMaxValue(100)))
+  .addSubcommand(c => c.setName('workspace-add').setDescription('接続後に既存フォルダーを許可（アクセス追加の明示確認が必要）')
+    .addStringOption(o => o.setName('alias').setDescription('新しい作業フォルダーの別名').setRequired(true).setMaxLength(40))
+    .addStringOption(o => o.setName('path').setDescription('このPCの既存フォルダーの絶対パス（OS sandboxではありません）').setRequired(true).setMaxLength(1024))
+    .addBooleanOption(o => o.setName('confirm-access').setDescription('許可ユーザーによるこのフォルダーへの作業アクセス追加を確認').setRequired(true)))
   .addSubcommand(c => c.setName('sessions').setDescription('許可Sessionを検索・ページ表示')
     .addStringOption(o => o.setName('query').setDescription('Session IDまたはタイトルで検索').setMaxLength(100))
     .addIntegerOption(o => o.setName('page').setDescription('ページ番号（1から）').setMinValue(1).setMaxValue(10000)))
@@ -46,7 +50,8 @@ export const command = new SlashCommandBuilder().setName('agent').setDescription
       .addBooleanOption(o => o.setName('confirm-duplicate-risk').setDescription('unknown配送の重複リスクを確認'))));
 
 export const HELP = `**DSH遠隔操作 — server-only**
-使用可能: /agent current, /agent workspaces [page], /agent sessions, /agent new, /agent bind, /agent unbind, /agent prompt, /agent status, /agent tasks, /agent result, /agent diagnose, /agent notifications show|set|retry, /agent notify（旧互換）。すべての操作は許可ユーザー・Guild・Channelを毎回検査します。
+作業フォルダー未指定でも接続できます。接続後、/agent workspace-add alias:<別名> path:<PC上の絶対パス> confirm-access:true で既存フォルダーを許可し、/agent new workspace:<別名> または /agent sessions → /agent bind で作業先を選びます。登録は許可ユーザー・Guild・Channel限定で、既存別名は上書きしません。パスをコマンド引数としてDiscordに渡すため、秘密の文字列を含めないでください。
+使用可能: /agent current, /agent workspaces [page], /agent workspace-add, /agent sessions, /agent new, /agent bind, /agent unbind, /agent prompt, /agent status, /agent tasks, /agent result, /agent diagnose, /agent notifications show|set|retry, /agent notify（旧互換）。すべての操作は許可ユーザー・Guild・Channelを毎回検査します。
 /agent currentは確認可能なSession・Workspace alias・busy・Binding version・通知方針を表示します。model/reasoningはNative契約で取得できないため「不明」と表示します。
 /models・/model・/reasoning・/context・/settingsは未対応: 現行Native Session契約にmodel catalog/settings read-write/reasoning/context usage APIがありません。/agent newはworkspace aliasのみで、title/model/effort指定は行いません。
 /agent historyは未登録です。現行Native page契約にevent type/fieldを絞る正式filterがないため、reasoning/secretsを取得しない保証ができません。履歴を他APIや既存Run照合で推測しません。結果全文は/agent resultから確認してください。

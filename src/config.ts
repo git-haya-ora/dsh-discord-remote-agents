@@ -6,6 +6,7 @@ export interface Config {
   allowedUserIds: Set<string>; allowedChannelIds: Set<string>;
   workspaces: Record<string, string>; dshUrl: string; dshToken: string;
   pollIntervalMs: number; databasePath: string;
+  connectionNotifications?: { dm: boolean; channels: boolean };
 }
 export function validateLocalUrl(value: string): string {
   let url: URL;

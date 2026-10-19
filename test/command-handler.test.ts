@@ -92,7 +92,7 @@ async function setup(t: { after: (fn: () => unknown) => void }) {
 
 test('command schema stays within Discord option limits and excludes unverified writes/history', () => {
   const schema = command.toJSON() as unknown as { options: Array<{ name: string; type: number; options?: Array<{ name: string; type: number; options?: unknown[] }> }> };
-  assert.equal(schema.options.length, 14);
+  assert.equal(schema.options.length, 15);
   assert.ok(schema.options.length <= 25);
   const names = new Set(schema.options.map(option => option.name));
   for (const forbidden of ['history', 'models', 'model', 'reasoning', 'context', 'settings', 'stop', 'approval', 'queue', 'files']) assert.equal(names.has(forbidden), false);
@@ -102,6 +102,20 @@ test('command schema stays within Discord option limits and excludes unverified 
   }
   const allNames = schema.options.flatMap(root => [root, ...(root.options ?? [])]).map(option => option.name);
   assert.equal(allNames.includes('progress'), false);
+});
+
+test('workspace registration requires authorization, confirmation and a supported Host callback', async t => {
+  const { engine, config } = await setup(t);
+  const inputs = { alias: 'project', path: '/synthetic/project', 'confirm-access': true };
+  await assert.rejects(handleAgentCommand(interaction('workspace-add', inputs), engine, config, true), { code: 'WORKSPACE_SETUP_UNAVAILABLE' });
+  const calls: unknown[] = [];
+  engine.registerWorkspace = async (...args) => { calls.push(args); };
+  await assert.rejects(handleAgentCommand(interaction('workspace-add', { ...inputs, 'confirm-access': false }), engine, config, true), { code: 'CONFIRMATION_REQUIRED' });
+  await assert.rejects(handleAgentCommand(interaction('workspace-add', inputs, { userId: '999999999999999999' }), engine, config, true), { code: 'NOT_AUTHORIZED' });
+  assert.equal(calls.length, 0);
+  const reply = await handleAgentCommand(interaction('workspace-add', inputs), engine, config, true);
+  assert.equal(calls.length, 1); assert.ok(!reply.content.includes(inputs.path));
+  assert.ok(reply.content.includes('/agent new'));
 });
 
 test('cross-user and DM rejection happen before adapter operations', async t => {

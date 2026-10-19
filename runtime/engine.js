@@ -11,6 +11,7 @@ export class Engine {
     secrets;
     sharedDiscordBindings;
     ticking = false;
+    registerWorkspace;
     constructor(adapter, store, policy, secrets = [], sharedDiscordBindings = false) {
         this.adapter = adapter;
         this.store = store;
@@ -42,6 +43,15 @@ export class Engine {
     key(actor) { return bindingKey(actor.guildId, actor.channelId, this.sharedDiscordBindings && actor.guildId !== 'telegram' ? 'shared' : actor.userId); }
     binding(actor) { return this.store.binding(this.key(actor)); }
     bindingVersion(actor) { return this.store.bindingVersion(this.key(actor)); }
+    async selectedSession(actor) {
+        this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+        const id = this.binding(actor), version = this.bindingVersion(actor);
+        const session = id ? await this.session(id, actor) : undefined;
+        this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+        if (this.binding(actor) !== id || this.bindingVersion(actor) !== version)
+            throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+        return { session, bindingVersion: version };
+    }
     async bind(actor, sessionId, expectedVersion = this.bindingVersion(actor)) {
         this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
         await this.session(sessionId, actor);

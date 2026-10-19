@@ -84,8 +84,9 @@ test('Client translations cover static and computed status/action keys in all sh
 });
 
 test('Client source uses the narrow RPC and write-only secret path without browser side channels',()=>{
- assert.match(client,/ctx\.connection\.rpc\.call|rpc\.call\(CHANNEL, 'manage'/u);
- assert.match(client,/const CHANNEL = '\/discord-remote-agents'/u);
+ assert.match(client,/rpc\.call\(CHANNEL, ENDPOINT/u);
+ assert.match(client,/const CHANNEL = '\/api'/u);
+  assert.match(client,/const ENDPOINT = 'discord-remote-agents\.manage'/u);
  assert.match(client,/operation: 'status'/u);assert.match(client,/operation: 'test'/u); // Save is exercised through the rendered form below.
  assert.match(client,/expectedRevision/u);assert.match(client,/confirmation: true/u);
  assert.match(client,/type: 'password'/u);assert.match(client,/autoComplete: 'new-password'/u);

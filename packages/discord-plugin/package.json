@@ -1,6 +1,6 @@
 {
   "name": "dsh-discord-remote-agents",
-  "version": "0.2.0-restricted.4",
+  "version": "0.2.0-restricted.8",
   "description": "Single-operator Discord text bridge for DSH; approvals, cancellation, attachments, artifacts, and atomic desktop coordination are unavailable",
   "private": true,
   "license": "UNLICENSED",

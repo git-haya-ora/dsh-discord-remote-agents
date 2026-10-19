@@ -15,7 +15,7 @@ function harness(call: (...args: any[]) => Promise<any>) {
     useEffect(action: () => () => void) { const i = cursor++; if (!(i in values)) { values[i] = true; effects.push(() => cleanups.push(action())); } },
   };
   new Script(source).runInContext(createContext({ AbortController, window: { __ModuleLoader__: { load(value: any) { module = value; } } } }));
-  const ctx = { effect(action: any) { action(); }, locale: { register() { return () => {}; } }, connection: { rpc: { call } }, slots: { inject(_name: string, action: any) { action(); }, register(_options: any, value: any) { component = value; return () => {}; } } };
+  const ctx = { effect(action: any) { action(); }, locale: { register() { return () => {}; } }, connection: { rpc: { async call(...args: any[]) { return { ok: true, value: await call(...args) }; } } }, slots: { inject(_name: string, action: any) { action(); }, register(_options: any, value: any) { component = value; return () => {}; } } };
   module.factory(() => React).apply(ctx);
   function render() { cursor = 0; tree = component({ t: (key: string) => key, view: 'page' }); for (const effect of effects.splice(0)) effect(); return tree; }
   function all(node: any = tree): Node[] { return node && typeof node === 'object' && 'type' in node ? [node, ...node.children.flat(Infinity).flatMap((child: any) => all(child))] : []; }
@@ -26,6 +26,51 @@ function harness(call: (...args: any[]) => Promise<any>) {
   return { render, all, id, button, settle, unmount() { for (const cleanup of cleanups) cleanup(); } };
 }
 const status = (revision = 1, autoStart = false) => ({ profile: 'single-operator-text-v1', revision, state: 'stopped', tokenConfigured: true, settings: { guildId: '11111111111111111', applicationId: '22222222222222222', allowedUserIds: ['33333333333333333'], allowedChannelIds: ['44444444444444444'], workspaces: { main: 'C:\\Work' }, autoStart }, capabilities: {} });
+test('Japanese delivery warning does not label a connected receiver as failed or disable settings', async () => {
+  const h = harness(async () => ({ ok: true, value: { ...status(), state: 'connected', lastError: 'CONNECTION_NOTICE_UNCONFIRMED' } })); await h.settle();
+  h.id('dra-language').props.onChange({ target: { value: 'ja' } }); h.render();
+  assert.ok(h.all().some(n => n.children.some((text: unknown) => typeof text === 'string' && text.includes('接続通知の送達を確認できません'))));
+  assert.equal(h.button('設定を保存').props.disabled, false); h.unmount();
+});
+test('connection notices are opt-in, independent, and saved only through explicit settings submission', async () => {
+  const calls: any[] = []; const h = harness(async (...args) => { calls.push(args[2]); return { ok: true, value: status() }; }); await h.settle();
+  assert.equal(h.id('dra-connection-dm').props.checked, false); assert.equal(h.id('dra-connection-channels').props.checked, false);
+  h.id('dra-connection-dm').props.onChange({ target: { checked: true } }); h.render();
+  h.id('dra-connection-channels').props.onChange({ target: { checked: true } }); h.render();
+  assert.equal(calls.length, 1); h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); await h.settle();
+  assert.equal(calls[1].operation, 'save'); assert.equal(calls[1].settings.connectionNotifications.dm, true); assert.equal(calls[1].settings.connectionNotifications.channels, true);
+  assert.equal(calls[1].token, undefined); h.unmount();
+});
+test('Japanese page selection translates actions without RPC, persistence, or losing unsaved fields', async () => {
+  const calls: any[] = [];
+  const h = harness(async (...args) => { calls.push(args[2]); return { ok: true, value: status() }; });
+  await h.settle();
+  h.id('dra-token').props.onChange({ target: { value: 'synthetic-input-only' } }); h.render();
+  h.id('dra-language').props.onChange({ target: { value: 'ja' } }); h.render();
+  assert.ok(h.all().some(n => n.children.includes('DiscordからDSHを使う')));
+  assert.equal(h.button('設定を保存').props.disabled, false);
+  assert.equal(h.id('dra-token').props.value, 'synthetic-input-only');
+  assert.deepEqual(calls.map(r => r.operation), ['status']);
+  h.id('dra-language').props.onChange({ target: { value: '__proto__' } }); h.render();
+  assert.equal(h.id('dra-language').props.value, 'ja');
+  h.id('dra-language').props.onChange({ target: { value: 'system' } }); h.render();
+  assert.ok(h.all().some(n => n.children.includes('title')));
+  assert.equal(calls.length, 1); h.unmount();
+});
+test('empty workspace row saves an empty allowlist and does not block connection setup', async () => {
+  const calls: any[] = [];
+  const empty = { ...status(), settings: { ...status().settings, workspaces: {} } };
+  const h = harness(async (...args) => { calls.push(args[2]); return { ok: true, value: empty }; });
+  await h.settle();
+  assert.equal(h.id('dra-workspace-0-alias').props.value, '');
+  assert.equal(h.id('dra-workspace-0-path').props.value, '');
+  h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} });
+  await h.settle();
+  assert.equal(calls[1].operation, 'save');
+  assert.equal(Object.keys(calls[1].settings.workspaces).length, 0);
+  h.unmount();
+});
+
 test('rendered settings consent and save send revision, write-only token, and prototype-safe aliases', async () => {
   const calls: any[][] = [];
   const h = harness(async (...args) => { calls.push(args); return { ok: true, value: status(calls.length) }; });
@@ -39,7 +84,7 @@ test('rendered settings consent and save send revision, write-only token, and pr
   h.id('dra-token').props.onChange({ target: { value: 'synthetic-input-only' } }); h.render();
   submit(); h.render(); assert.equal(h.id('dra-token').props.value, ''); await h.settle();
   assert.equal(calls.length, 2); const [channel, endpoint, request, signal] = calls[1]!;
-  assert.equal(channel, '/discord-remote-agents'); assert.equal(endpoint, 'manage'); assert.ok(signal instanceof AbortSignal);
+  assert.equal(channel, '/api'); assert.equal(endpoint, 'discord-remote-agents.manage'); assert.ok(signal instanceof AbortSignal);
   assert.equal(request.operation, 'save'); assert.equal(request.expectedRevision, 1); assert.equal(request.settings.autoStart, true);
   assert.equal(request.token, 'synthetic-input-only'); assert.equal(Object.getPrototypeOf(request.settings.workspaces), null);
   assert.equal(request.settings.workspaces.__proto__, 'C:\\Work'); h.unmount();
@@ -84,7 +129,7 @@ for (const operation of ['refresh', 'start'] as const) test(`unmount aborts pend
  let calls = 0; const h = harness(async () => { calls++; return { ok: true, value: { ...status(), tokenConfigured: false, settings: { autoStart: false } } }; }); await h.settle();
  h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); h.render();
  for (const id of ['dra-guildId', 'dra-applicationId', 'dra-allowedUserIds', 'dra-allowedChannelIds', 'dra-token']) assert.equal(h.id(id).props['aria-invalid'], true);
- assert.ok(h.all().some(n => n.children.includes('requiredWorkspace'))); assert.equal(calls, 1); h.unmount();
+ assert.ok(!h.all().some(n => n.children.includes('requiredWorkspace'))); assert.equal(calls, 1); h.unmount();
  });
  test('multiple workspace rows and multiple allowed IDs round-trip without alias parsing', async () => {
  const calls: any[] = []; const settings = { ...status().settings, workspaces: JSON.parse('{"__proto__":"C:\\\\One","second_name":"D:\\\\Two"}'), allowedUserIds: ['33333333333333333', '55555555555555555'], allowedChannelIds: ['44444444444444444', '66666666666666666'] };
@@ -107,9 +152,9 @@ test('fresh Host null settings can save without optional token testing', async (
   const h = harness(async (...args) => { calls.push(args[2]); return { ok: true, value: calls.length === 1 ? { ...status(), state: 'unconfigured', tokenConfigured: false, settings: null } : status(2) }; });
   await h.settle();
   assert.equal(h.button('save').props.disabled, false);
-  assert.equal(h.id('dra-workspace-0-alias').props.value, 'main');
+  assert.equal(h.id('dra-workspace-0-alias').props.value, '');
   for (const [key, value] of Object.entries({ guildId: '11111111111111111', applicationId: '22222222222222222', allowedUserIds: '33333333333333333', allowedChannelIds: '44444444444444444', token: 'synthetic-only' })) h.id(`dra-${key}`).props.onChange({ target: { value } });
-  h.id('dra-workspace-0-path').props.onChange({ target: { value: 'C:\\Work' } }); h.render();
+  h.render(); // First setup deliberately leaves both optional folder fields blank.
   h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); await h.settle();
   assert.deepEqual(calls.map(r => r.operation), ['status', 'save']);
   assert.equal(h.id('dra-token').props.value, ''); h.unmount();

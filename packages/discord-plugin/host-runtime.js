@@ -7,8 +7,8 @@ import { command } from './runtime/commands.js';
 import { NativeSessionAdapter } from './native-adapter.js';
 import { WindowsSecretStore, prepareAdmissionJournalRoot, isSecretRef } from './windows-secrets.js';
 
-export const RPC_CHANNEL = '/discord-remote-agents';
-export const RPC_ENDPOINT = 'manage';
+export const RPC_CHANNEL = '/api';
+export const RPC_ENDPOINT = 'discord-remote-agents.manage';
 const profile = 'single-operator-text-v1';
 const capabilities = Object.freeze({ text: true, atomicAcceptance: false, approval: false, cancel: false, attachments: false, artifacts: false });
 const emptyCapabilities = Object.freeze({ ...capabilities, text: false });
@@ -24,19 +24,23 @@ function token(value) {
   return value.trim();
 }
 export function validateSettings(value) {
-  keys(value, ['guildId', 'applicationId', 'allowedUserIds', 'allowedChannelIds', 'workspaces', 'autoStart']);
+  keys(value, ['guildId', 'applicationId', 'allowedUserIds', 'allowedChannelIds', 'workspaces', 'autoStart', 'connectionNotifications']);
+  if (value.connectionNotifications !== undefined) {
+    keys(value.connectionNotifications, ['dm', 'channels']);
+    if (typeof value.connectionNotifications.dm !== 'boolean' || typeof value.connectionNotifications.channels !== 'boolean') fail('SETTINGS_INVALID');
+  }
   if (!id(value.guildId) || !id(value.applicationId) || typeof value.autoStart !== 'boolean') fail('SETTINGS_INVALID');
   const ids = input => {
     if (!Array.isArray(input) || input.length < 1 || input.length > 100 || !input.every(id) || new Set(input).size !== input.length) fail('SETTINGS_INVALID');
     return [...input];
   };
-  if (!record(value.workspaces) || Object.keys(value.workspaces).length < 1 || Object.keys(value.workspaces).length > 32) fail('SETTINGS_INVALID');
+  if (!record(value.workspaces) || Object.keys(value.workspaces).length > 32) fail('SETTINGS_INVALID');
   const workspaces = Object.create(null);
   for (const [alias, path] of Object.entries(value.workspaces)) {
     if (!/^[a-zA-Z0-9_-]{1,40}$/.test(alias) || typeof path !== 'string' || path.length > 1024 || !isAbsolute(path) || /[\0\r\n]/.test(path)) fail('SETTINGS_INVALID');
     workspaces[alias] = path;
   }
-  return { guildId: value.guildId, applicationId: value.applicationId, allowedUserIds: ids(value.allowedUserIds), allowedChannelIds: ids(value.allowedChannelIds), workspaces, autoStart: value.autoStart };
+  return { guildId: value.guildId, applicationId: value.applicationId, allowedUserIds: ids(value.allowedUserIds), allowedChannelIds: ids(value.allowedChannelIds), workspaces, autoStart: value.autoStart, ...(value.connectionNotifications === undefined ? {} : { connectionNotifications: { dm: value.connectionNotifications.dm, channels: value.connectionNotifications.channels } }) };
 }
 export function validateManagementRequest(request) {
   if (!record(request) || Buffer.byteLength(JSON.stringify(request), 'utf8') > 65536) fail('INVALID_REQUEST');
@@ -105,7 +109,7 @@ export class DiscordHost {
       const root = config.dataRoot ?? (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'DSHDiscordRemoteAgents', profile) : undefined);
       if (typeof root !== 'string' || !isAbsolute(root) || root.length > 1024 || /[\0\r\n]/.test(root)) fail('DATA_ROOT_REQUIRED');
       this.dataRoot = root;
-      if (!ctx?.connection?.rpc?.handle || !ctx?.sessionController || ['list', 'create', 'projections', 'page', 'prompt'].some(name => typeof ctx.sessionController[name] !== 'function')) fail('HOST_COMPATIBILITY_UNVERIFIED');
+      if (typeof ctx?.connection?.fetch?.register !== 'function' || !ctx?.sessionController || ['list', 'create', 'projections', 'page', 'prompt'].some(name => typeof ctx.sessionController[name] !== 'function')) fail('HOST_COMPATIBILITY_UNVERIFIED');
       this.compatible = true;
     } catch (error) { this.compatible = false; this.state = 'blocked'; this.lastError = safeCode(error); }
   }
@@ -166,7 +170,7 @@ export class DiscordHost {
       unknownRuns: runs.filter(run => run.state === 'unknown').length,
       pendingNotifications: runs.filter(run => run.notification === 'pending').length,
       unknownNotifications: runs.filter(run => run.notification === 'unknown').length,
-      ...(this.lastError ? { lastError: this.lastError } : {}) };
+      ...(this.lastError || this.connectionNoticeFailed ? { lastError: this.lastError || 'CONNECTION_NOTICE_UNCONFIRMED' } : {}) };
   }
   dispatch(input, signal = this.lifecycleAbort.signal) {
     const task = this.runDispatch(input, AbortSignal.any([signal, this.lifecycleAbort.signal]));
@@ -267,6 +271,25 @@ export class DiscordHost {
     // Availability/protocol validation before advertising or starting native text capabilities.
     await this.adapter.list(); this.nativeVerified = true;
     const engine = new Engine(this.adapter, this.store, policy, [candidate], true);
+    engine.registerWorkspace = async (actor, alias, path, confirmed) => {
+      policy.authorize(actor.userId, actor.guildId, actor.channelId);
+      if (!confirmed) fail('CONFIRMATION_REQUIRED');
+      if (this.busy || this.disposed || this.engine !== engine) fail('MANAGEMENT_BUSY');
+      this.busy = true;
+      const previous = this.settingsState;
+      try {
+        const previousBytes = this.store.setting(stateKey);
+        await policy.addWorkspace(alias, path, actor.guildId, () => {
+          policy.authorize(actor.userId, actor.guildId, actor.channelId);
+          if (this.disposed || this.engine !== engine || this.settingsState !== previous) fail('REVISION_CONFLICT');
+          const settings = validateSettings({ ...previous.settings, workspaces: { ...previous.settings.workspaces, [alias]: path } });
+          const next = { ...previous, revision: previous.revision + 1, settings };
+          if (!Number.isSafeInteger(next.revision) || next.revision >= Number.MAX_SAFE_INTEGER - 10) fail('REVISION_CONFLICT');
+          if (!this.store.compareSetting(stateKey, previousBytes, JSON.stringify(next))) fail('REVISION_CONFLICT');
+          this.settingsState = next;
+        });
+      } finally { this.busy = false; }
+    };
     const bot = this.internals.createBot ? this.internals.createBot(config, engine) : new DiscordBot(config, engine, undefined, true);
     this.state = 'connecting'; this.bot = bot; this.engine = engine;
     try {
@@ -274,6 +297,16 @@ export class DiscordHost {
       if (this.disposed || bot.client?.isReady && !bot.client.isReady()) fail('RECEIVER_NOT_READY');
       this.state = 'connected';
     } catch (error) { await bot.stop().catch(() => {}); this.bot = undefined; this.engine = undefined; this.state = 'stopped'; throw error; }
+    // Message failure is not a failed connection and must never trigger reconnect/prompt replay.
+    this.connectionNoticeFailed = false;
+    if (typeof bot.notifyConnected === 'function') {
+      try {
+        // A slow/blocked DM must not hold the management RPC or make a ready receiver look failed.
+        Promise.resolve(bot.notifyConnected()).then(result => {
+          if (!this.disposed && this.bot === bot) this.connectionNoticeFailed = result?.failed !== 0;
+        }, () => { if (!this.disposed && this.bot === bot) this.connectionNoticeFailed = true; });
+      } catch { this.connectionNoticeFailed = true; }
+    }
   }
   async stop() {
     const bot = this.bot;

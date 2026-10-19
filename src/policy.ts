@@ -1,5 +1,5 @@
 import { realpath, stat } from 'node:fs/promises';
-import { normalize } from 'node:path';
+import { normalize, isAbsolute } from 'node:path';
 import type { Config } from './config.js';
 import { AppError } from './errors.js';
 export class Policy {
@@ -48,6 +48,19 @@ export class Policy {
   }
   async requireCwd(cwd: string | undefined, guildId?: string): Promise<void> {
     if (!await this.allowsCwd(cwd, guildId)) throw new AppError('WORKSPACE_FORBIDDEN', 'このセッションの作業フォルダーは許可されていません。');
+  }
+  async addWorkspace(name: string, path: string, guildId: string, persist: () => void): Promise<void> {
+    if (this.realms) return this.scope(guildId).addWorkspace(name, path, guildId, persist);
+    if (guildId !== this.config.guildId) throw new AppError('NOT_AUTHORIZED', 'この操作元では利用できません。');
+    if (!/^[a-zA-Z0-9_-]{1,40}$/.test(name) || typeof path !== 'string' || !isAbsolute(path) || path.length > 1024 || /[\0\r\n]/.test(path)) throw new AppError('WORKSPACE_INVALID', '別名と、このPCの既存フォルダーの絶対パスを指定してください。');
+    if (Object.hasOwn(this.config.workspaces, name) || Object.keys(this.config.workspaces).length >= 32) throw new AppError('WORKSPACE_CONFLICT', '別名は上書きできません。新しい別名を指定してください（最大32件）。');
+    let key: string;
+    try { key = await this.directoryKey(path); } catch { throw new AppError('WORKSPACE_INVALID', '既存の作業フォルダーを指定してください。'); }
+    if (Object.hasOwn(this.config.workspaces, name) || Object.keys(this.config.workspaces).length >= 32) throw new AppError('WORKSPACE_CONFLICT', '作業フォルダーの登録が競合しました。');
+    // Persist and reauthorize synchronously after the filesystem await, before granting access.
+    persist();
+    Object.defineProperty(this.config.workspaces, name, { value: path, enumerable: true, configurable: true, writable: true });
+    this.paths.add(key);
   }
   workspace(name: string, guildId?: string): string {
     if (this.realms) return this.scope(guildId).workspace(name);

@@ -1,4 +1,6 @@
-import { AttachmentBuilder, Client, Events, GatewayIntentBits, MessageFlags, escapeMarkdown, type ChatInputCommandInteraction } from 'discord.js';
+import { randomUUID } from 'node:crypto';
+import { connectionNotice } from './connection-notice.js';
+import { AttachmentBuilder, Client, Events, GatewayIntentBits, MessageFlags, RateLimitError, escapeMarkdown, type ChatInputCommandInteraction } from 'discord.js';
 import type { Config } from './config.js';
 import { AppError, errorCode, safeError } from './errors.js';
 import { Engine, type Actor, type Notify } from './engine.js';
@@ -20,10 +22,13 @@ export function resultPayload(run: Run, textOnly = false): { content: string; fi
   return { content, files: !textOnly && text.length > 1200 ? [new AttachmentBuilder(Buffer.from(text, 'utf8'), { name: `result-${run.id}.txt` })] : [] };
 }
 export class DiscordBot {
-  readonly client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  // SDK POST retries would bypass the durable unknown fence. Let the Engine own explicit 429 waits.
+  readonly client = new Client({ intents: [GatewayIntentBits.Guilds], rest: { retries: 0, rejectOnRateLimit: ['/channels', '/users'] } });
   private timer: NodeJS.Timeout | undefined;
   private pendingTick: Promise<void> | undefined;
   private stopping = false;
+  private connectionNoticeTask: Promise<{ sent: number; failed: number }> | undefined;
+  private readonly connectionNoticeId = randomUUID();
   private readonly handling = new Set<Promise<void>>();
   constructor(private readonly config: Config, private readonly engine: Engine, private readonly notificationRouter?: Notify, private readonly textOnly = false) {
     this.client.on(Events.InteractionCreate, interaction => {
@@ -40,6 +45,46 @@ export class DiscordBot {
   async start(): Promise<void> {
     try { await this.client.login(this.config.token); }
     catch { throw new AppError('DISCORD_AUTH', 'Discordに接続できません。Botトークンとネットワークを確認してください。'); }
+  }
+  /** Once per explicit receiver start, never on polling or a gateway-ready replay. */
+  notifyConnected(): Promise<{ sent: number; failed: number }> {
+    if (!this.connectionNoticeTask) this.connectionNoticeTask = this.sendConnectionNotices();
+    return this.connectionNoticeTask;
+  }
+  private async sendConnectionNotices(): Promise<{ sent: number; failed: number }> {
+    let sent = 0, failed = 0;
+    const settings = this.config.connectionNotifications;
+    if (!settings?.dm && !settings?.channels) return { sent, failed };
+    if (!this.client.isReady() || this.stopping) return { sent, failed: 1 };
+    const users = [...this.config.allowedUserIds], channels = [...this.config.allowedChannelIds];
+    const deliver = async (kind: 'dm' | 'channel', id: string, actors: Actor[]) => {
+      const key = `connection-notice:${this.connectionNoticeId}:${kind}:${id}`;
+      try {
+        for (const actor of actors) this.engine.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+        const target = kind === 'dm' ? await this.client.users.fetch(id) : await this.client.channels.fetch(id);
+        if (!target || kind === 'channel' && (!('isSendable' in target) || !target.isSendable() || !('guildId' in target) || target.guildId !== this.config.guildId)) throw new AppError('DELIVERY_BLOCKED', '通知先を確認できません。');
+        const notice = await connectionNotice(this.engine, this.config, actors);
+        notice.assertCurrent();
+        if (this.stopping || !this.client.isReady() || !(kind === 'dm' ? this.config.connectionNotifications?.dm : this.config.connectionNotifications?.channels)) throw new AppError('DELIVERY_BLOCKED', '通知は停止されました。');
+        if (!this.engine.store.claimReceipt(key)) return;
+        // Persist the uncertainty fence before Discord may accept a message. No body is stored.
+        this.engine.store.setSetting(key, JSON.stringify({ state: 'unknown' }));
+        const send = target as { send(options: unknown): Promise<{ id: string }> };
+        const receipt = await send.send({ content: notice.content, allowedMentions: { parse: [] }, flags: MessageFlags.SuppressEmbeds,
+          nonce: digest(key).slice(0, 24), enforceNonce: true });
+        if (!receipt || typeof receipt.id !== 'string' || !/^\d{17,20}$/.test(receipt.id)) throw new AppError('NOTIFICATION_UNKNOWN', '通知の受領を確認できません。');
+        this.engine.store.setSetting(key, JSON.stringify({ state: 'sent', messageId: receipt.id })); sent++;
+      } catch { failed++; /* Never retry, redirect, echo an error, or replay a Native prompt. */ }
+    };
+    if (settings.dm) for (const userId of users) {
+      if (this.stopping) break;
+      await deliver('dm', userId, channels.map(channelId => ({ userId, guildId: this.config.guildId, channelId })));
+    }
+    if (settings.channels) for (const channelId of channels) {
+      if (this.stopping) break;
+      if (users[0]) await deliver('channel', channelId, [{ userId: users[0], guildId: this.config.guildId, channelId }]);
+    }
+    return { sent, failed };
   }
   private tick(): void {
     if (this.pendingTick || this.stopping) return;
@@ -67,6 +112,10 @@ export class DiscordBot {
       if (error instanceof AppError) throw error;
       const raw = error && typeof error === 'object' ? error as { code?: unknown; status?: unknown; retry_after?: unknown; rawError?: { retry_after?: unknown } } : {};
       if (this.textOnly || part) {
+        if (error instanceof RateLimitError) {
+          const rateLimit = new AppError('DELIVERY_RATE_LIMIT', 'Discordの指定待機後に再試行します。');
+          Object.assign(rateLimit, { retryAfterMs: Number.isFinite(error.retryAfter) && error.retryAfter >= 0 ? Math.ceil(error.retryAfter) : NaN }); throw rateLimit;
+        }
         if (raw.status === 429) {
           const seconds = Number(raw.retry_after ?? raw.rawError?.retry_after);
           const rateLimit = new AppError('DELIVERY_RATE_LIMIT', 'Discordの指定待機後に再試行します。');
@@ -95,7 +144,7 @@ export class DiscordBot {
   }
   async stop(): Promise<void> {
     this.stopping = true; if (this.timer) clearInterval(this.timer);
-    await Promise.allSettled([...this.handling]); await this.pendingTick;
+    await Promise.allSettled([...this.handling]); await this.pendingTick; await this.connectionNoticeTask;
     await this.client.destroy();
   }
 }

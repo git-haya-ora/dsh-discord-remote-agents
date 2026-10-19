@@ -1,16 +1,17 @@
 # Chapter 23A Discord commands
 
-This chapter implements the server-only command-verification slice of specification §23. It does not enable DM-only mode, model/settings mutation, or any C-priority operation. Discord command registration remains explicit (`npm run register`); this work does not register commands against Discord.
+This chapter implements the server-only command-verification slice of specification §23. It does not enable DM-only mode, model/settings mutation, or any C-priority operation. Discord command registration remains an explicit authenticated GUI action; this work does not register commands against Discord. Folder configuration is optional for saving/connecting. An empty allowlist grants no Session access until an operator adds a folder in the GUI or with `/agent workspace-add`. The command updates the saved revision and disarms future auto-start, without stopping the current receiver; stale GUI saves are rejected.
 
 ## Registered surface
 
-The `/agent` root has 14 children (13 subcommands and one group), each subcommand has at most 3 options, and `/agent notifications` has 3 subcommands. Thus no command hierarchy level exceeds Discord's 25-option limit.
+The `/agent` root has 15 children (14 subcommands and one group), each subcommand has at most 3 options, and `/agent notifications` has 3 subcommands. Thus no command hierarchy level exceeds Discord's 25-option limit.
 
 | Command | Behavior and limits |
 | --- | --- |
 | `/agent help [topic]` | Lists implemented features and explains unsupported contract-dependent operations. |
 | `/agent current` | Shows the selected, authorized Session; safe title, configured Workspace alias when it matches, observed busy state, Binding version, model/reasoning availability, and notification preferences. |
 | `/agent workspaces` | Lists configured aliases only; never returns local paths. |
+| `/agent workspace-add alias:<new> path:<absolute> confirm-access:true` | Allows an existing directory after connection. Requires configured user/Guild/Channel and explicit access confirmation. Adds at most 32 aliases, never overwrites an alias or selects/creates a Session. Persists before granting runtime access; revision conflicts fail closed. Changes neither credentials nor existing Runs. Paths are submitted to Discord as arguments, never echoed by the response; do not include secrets. |
 | `/agent sessions [query] [page]` | Searches authorized non-subagent Sessions by case-insensitive substring of ID or title; page size is 5. |
 | `/agent new workspace:<alias>` | Uses the configured alias and current Native `create` contract. Title/model/effort are not accepted; non-null injected/stale values are rejected before Native `create` because no verified creation-settings contract exists. |
 | `/agent bind session:<id>` / `/agent unbind` | Selects an authorized Session / removes only the selection. |

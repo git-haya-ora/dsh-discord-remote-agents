@@ -4,7 +4,7 @@ const root = new URL('../', import.meta.url);
 const destination = new URL('packages/discord-plugin/runtime/', root);
 await mkdir(destination, { recursive: true });
 // Explicit self-contained allowlist. Legacy HTTP/env/Telegram entrypoints are not shipped.
-const names = ['engine', 'store', 'policy', 'types', 'errors', 'protocol', 'output', 'bot', 'commands', 'command-handler'];
+const names = ['engine', 'store', 'policy', 'types', 'errors', 'protocol', 'output', 'bot', 'commands', 'command-handler', 'connection-notice'];
 const allowed = new Set(names.map(name => `${name}.js`));
 if ((await readdir(destination, { withFileTypes: true })).some(entry => !entry.isFile() || !allowed.has(entry.name))) {
   throw new Error('Unexpected packaged runtime entry; refusing stale output without deleting it');

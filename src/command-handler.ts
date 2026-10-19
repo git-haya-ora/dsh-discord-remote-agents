@@ -237,6 +237,14 @@ export async function handleAgentCommand(
       const preferences = engine.notificationPreferences(actor);
       return { content: `Agent: DSH\nSession ID: ${safeId(engine, sessionId)}\nタイトル: ${safeTitle(engine, session.title)}\nWorkspace: ${safeTitle(engine, workspaceAlias(config, session), 80)}\nModel: 不明（Native Session契約未公開）\nReasoning: 不明（model別metadata未公開）\nBusy: ${busy}\nBinding version: ${bindingVersion}\n通知先: ${preferences.destination === 'dm' ? '本人DM' : '許可サーバーの元チャンネル'}\n進捗通知: 未対応（最終回答のみ）` };
     }
+    case 'workspace-add': {
+      if (!engine.registerWorkspace) throw new AppError('WORKSPACE_SETUP_UNAVAILABLE', 'このHostはDiscordからの作業フォルダー登録に対応していません。');
+      if (interaction.options.getBoolean('confirm-access') !== true) throw new AppError('CONFIRMATION_REQUIRED', 'このフォルダーへの作業アクセス追加を confirm-access:true で明示確認してください。');
+      const alias = interaction.options.getString('alias', true);
+      await engine.registerWorkspace(actor, alias, interaction.options.getString('path', true), interaction.options.getBoolean('confirm-access') === true);
+      engine.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+      return { content: `作業フォルダー ${safeTitle(engine, alias, 40)}を許可・保存しました。パスは表示しません。\n/agent new workspace:<別名> で新規作成、または /agent sessions → /agent bind session:<ID> で選択してください。\n既存Run・選択Sessionは変更していません。設定版の更新により今後の自動起動は解除されます。必要ならGUIで再確認してください。フォルダー許可はOS sandboxではありません。` };
+    }
     case 'workspaces': {
       const aliases = Object.keys(config.workspaces).filter(alias => {
         try { engine.policy.workspace(alias, actor.guildId); return true; } catch { return false; }
