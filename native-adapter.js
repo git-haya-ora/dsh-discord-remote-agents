@@ -8,7 +8,7 @@ function protocol() { throw new AppError('DSH_PROTOCOL', 'Native Sessionの応�
 export class NativeSessionAdapter {
   constructor(controller, store, signal = new AbortController().signal) {
     if (!controller || methods.some(method => typeof controller[method] !== 'function')) throw new AppError('HOST_COMPATIBILITY_UNVERIFIED', '正式Native Session serviceが利用できません。');
-    this.controller = controller; this.store = store; this.signal = signal;
+    this.controller = controller; this.store = store; this.signal = signal; this.verifiedSessions = new Set();
   }
   async call(method, request) {
     this.signal.throwIfAborted();
@@ -71,6 +71,17 @@ export class NativeSessionAdapter {
       throw error;
     }
   }
+  async verifySession(sessionId) {
+    if (this.verifiedSessions.has(sessionId)) return;
+    // Never create/adopt a Session to probe compatibility. The caller must first
+    // authorize this exact ordinary Session; strict empty modern-page shape is a
+    // read-only profile check, with no legacy fallback or alternate envelope.
+    const session = (await this.list()).find(value => value.sessionId === sessionId && !value.subagent);
+    if (!session) throw new DshRejected('SESSION_NOT_FOUND', 'DSHセッションが見つかりません。');
+    const probe = object(await this.call('page', { address: { kind: 'session', sessionId }, throughSeq: -1, maxMessages: 1 }));
+    if (!Array.isArray(probe.records) || probe.records.length !== 0 || probe.hasMore !== false) protocol();
+    this.verifiedSessions.add(sessionId);
+  }
   async snapshot(sessionId) {
     const value = await this.call('projections', { sessionId });
     if (value === null) throw new DshRejected('SESSION_NOT_FOUND', 'DSHセッションが見つかりません。');
@@ -105,6 +116,65 @@ export class NativeSessionAdapter {
       beforeSeq = first;
     }
     throw new AppError('DSH_TOO_LARGE', '履歴が上限を超えました。PCで確認してください。');
+  }
+  async callRemote(method, ...args) {
+    this.signal.throwIfAborted();
+    const signal = AbortSignal.any([this.signal, AbortSignal.timeout(30000)]);
+    let abort;
+    const interrupted = new Promise((_, reject) => {
+      abort = () => reject(signal.reason); signal.addEventListener('abort', abort, { once: true });
+    });
+    try {
+      // Exact generated Remote argument lists: catalog() and rename(request), with no local AbortSignal argument.
+      return await Promise.race([Promise.resolve(this.controller[method](...args)), interrupted]);
+    } catch (error) {
+      if (rejectedBeforeAdmission.has(error?.code)) throw new DshRejected('DSH_REJECTED', 'Native Sessionが受付前に操作を拒否しました。');
+      throw new AppError('DSH_REMOTE_ERROR', 'Native Sessionの操作結果を確定できません。PCで確認してください。');
+    } finally { signal.removeEventListener('abort', abort); }
+  }
+  async modelCatalog() {
+    if (typeof this.controller.modelCatalog !== 'function') throw new AppError('MODEL_CATALOG_UNAVAILABLE', 'Native model catalogは利用できません。');
+    const raw = object(await this.callRemote('modelCatalog'));
+    const text = value => {
+      if (typeof value !== 'string' || !value || value.length > 256 || /[\u0000-\u001f\u007f]/u.test(value)) protocol();
+      return value;
+    };
+    const modelSelection = value => {
+      const item = object(value);
+      return { provider: text(item.provider), model: text(item.model), ...(item.reasoningEffort === undefined ? {} : { reasoningEffort: text(item.reasoningEffort) }) };
+    };
+    if (!Array.isArray(raw.groups) || raw.groups.length > 256 || !Array.isArray(raw.routableProviders)
+      || raw.routableProviders.length > 256 || !Array.isArray(raw.failures) || raw.failures.length > 256) protocol();
+    let modelCount = 0;
+    const groups = raw.groups.map(groupValue => {
+      const group = object(groupValue);
+      if (!Array.isArray(group.models) || group.models.length > 2048 || (modelCount += group.models.length) > 5000) protocol();
+      return { id: text(group.id), name: text(group.name), models: group.models.map(modelValue => {
+        const model = object(modelValue);
+        const result = { id: text(model.id), name: text(model.name) };
+        if (model.reasoning !== undefined) {
+          const reasoning = object(model.reasoning);
+          if (!Array.isArray(reasoning.efforts) || reasoning.efforts.length > 64) protocol();
+          result.reasoning = { efforts: reasoning.efforts.map(effortValue => {
+            const effort = object(effortValue); return { id: text(effort.id), name: text(effort.name) };
+          }), ...(reasoning.defaultEffort === undefined ? {} : { defaultEffort: text(reasoning.defaultEffort) }) };
+        }
+        return result;
+      }) };
+    });
+    const routableProviders = raw.routableProviders.map(text);
+    return { default: modelSelection(raw.default), routableProviders, groups, failedProviders: raw.failures.length };
+  }
+  async rename(request) {
+    if (typeof this.controller.rename !== 'function') throw new AppError('SESSION_RENAME_UNAVAILABLE', 'Native Session title update is not available.');
+    if (!request || typeof request.sessionId !== 'string' || !request.sessionId || typeof request.title !== 'string'
+      || !request.title.trim() || Array.from(request.title).length > 100 || /[\u0000-\u001f\u007f]/u.test(request.title)) {
+      throw new DshRejected('SESSION_TITLE_INVALID', 'Session title is invalid.');
+    }
+    const value = object(await this.callRemote('rename', { sessionId: request.sessionId, title: request.title }));
+    if (typeof value.title !== 'string' || !value.title || value.title.length > 256 || /[\u0000-\u001f\u007f]/u.test(value.title)
+      || !Number.isSafeInteger(value.seq) || value.seq < 0) protocol();
+    return { title: value.title, seq: value.seq };
   }
   async prompt(sessionId, requestId, text) {
     if (typeof text !== 'string' || !text.trim() || text.length > 6000 || typeof sessionId !== 'string' || typeof requestId !== 'string') throw new DshRejected('PROMPT_INVALID', 'テキスト指示が不正です。');

@@ -11,6 +11,7 @@ export class Engine {
     secrets;
     sharedDiscordBindings;
     ticking = false;
+    sessionMutations = new Set();
     registerWorkspace;
     constructor(adapter, store, policy, secrets = [], sharedDiscordBindings = false) {
         this.adapter = adapter;
@@ -33,12 +34,32 @@ export class Engine {
         return allowed.sort((a, b) => b.updatedAt - a.updatedAt);
     }
     async session(sessionId, actor) {
-        const session = (await this.adapter.list()).find(s => s.sessionId === sessionId && !s.subagent);
+        let session = (await this.adapter.list()).find(s => s.sessionId === sessionId && !s.subagent);
         if (!session)
             throw new AppError('SESSION_NOT_FOUND', 'DSHセッションが見つかりません。');
         await this.policy.requireCwd(session.cwd, actor.guildId);
         this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+        if (this.adapter.verifySession) {
+            await this.adapter.verifySession(sessionId);
+            const confirmed = (await this.adapter.list()).find(s => s.sessionId === sessionId && !s.subagent);
+            if (!confirmed || confirmed.cwd !== session.cwd)
+                throw new AppError('SESSION_CHANGED', 'Native Sessionのworkspace identityが変わりました。操作を停止しました。');
+            await this.policy.requireCwd(confirmed.cwd, actor.guildId);
+            this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+            session = confirmed;
+        }
         return session;
+    }
+    async withSessionMutation(sessionId, operation) {
+        if (!sessionId || this.sessionMutations.has(sessionId))
+            throw new AppError('SESSION_BUSY', '同じBridge Sessionで別の送信・変更処理中です。状態を再確認してください。');
+        this.sessionMutations.add(sessionId);
+        try {
+            return await operation();
+        }
+        finally {
+            this.sessionMutations.delete(sessionId);
+        }
     }
     key(actor) { return bindingKey(actor.guildId, actor.channelId, this.sharedDiscordBindings && actor.guildId !== 'telegram' ? 'shared' : actor.userId); }
     binding(actor) { return this.store.binding(this.key(actor)); }
@@ -89,47 +110,54 @@ export class Engine {
         const sessionId = this.binding(actor);
         if (!sessionId)
             throw new AppError('NOT_BOUND', '/agent bindでセッションを選択してください。');
-        const session = await this.session(sessionId, actor);
-        if (session.running)
-            throw new AppError('SESSION_BUSY', 'DSHが実行中です。完了後に送信してください。');
-        const snapshot = await this.adapter.snapshot(sessionId);
-        const inbox = object(snapshot.values.inbox);
-        if ([inbox['next-turn'], inbox['next-step']].some(queue => Array.isArray(queue) && queue.length > 0)) {
-            throw new AppError('SESSION_BUSY', 'DSHに未処理の指示があります。PCで確認してください。');
-        }
-        this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
-        if (this.binding(actor) !== sessionId || this.bindingVersion(actor) !== bindingVersion)
-            throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
-        const now = Date.now();
-        const run = { id, requestId: `${actor.guildId === 'telegram' ? 'telegram' : 'discord'}:${id}`, sessionId, ...actor,
-            state: 'dispatching', createdAt: now, updatedAt: now, lastSeq: snapshot.cursor, startSeq: snapshot.cursor, payloadDigest, turn: null,
-            output: '', result: '', admitted: false, contaminated: false, bindingVersion,
-            ...(this.store.metadataOnly && actor.guildId !== 'telegram' ? { notificationPreferences: this.notificationPreferences(actor) } : {}),
-            notification: 'none', notifyAttempts: 0, nextNotifyAt: 0, lastError: '' };
-        this.store.create(run); // Durable intent BEFORE the only prompt call. Never replay uncertain dispatches.
-        try {
-            await this.adapter.prompt(sessionId, run.requestId, text);
-            run.state = 'accepted';
-        }
-        catch (error) {
-            run.lastError = errorCode(error);
-            if (error instanceof DshRejected) {
-                run.state = 'failed';
-                run.result = 'DSHが送信を拒否しました。設定とセッション状態を確認してください。';
-                run.notification = 'pending';
+        return this.withSessionMutation(sessionId, async () => {
+            const session = await this.session(sessionId, actor);
+            if (session.running)
+                throw new AppError('SESSION_BUSY', 'DSHが実行中です。完了後に送信してください。');
+            const snapshot = await this.adapter.snapshot(sessionId);
+            const rawInbox = snapshot.values.inbox;
+            if (!rawInbox || typeof rawInbox !== 'object' || Array.isArray(rawInbox))
+                throw new AppError('SESSION_STATE_UNKNOWN', 'Native queue状態を確認できません。指示を送信せずPCで確認してください。');
+            const inbox = object(rawInbox);
+            if (!Array.isArray(inbox['next-turn']) || !Array.isArray(inbox['next-step']))
+                throw new AppError('SESSION_STATE_UNKNOWN', 'Native queue状態を確認できません。指示を送信せずPCで確認してください。');
+            if (inbox['next-turn'].length > 0 || inbox['next-step'].length > 0) {
+                throw new AppError('SESSION_BUSY', 'DSHに未処理の指示があります。PCで確認してください。');
             }
-            else {
-                run.state = 'unknown';
-                run.result = '送信結果が不明です。再送せず履歴を照合中です。';
+            this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+            if (this.binding(actor) !== sessionId || this.bindingVersion(actor) !== bindingVersion)
+                throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+            const now = Date.now();
+            const run = { id, requestId: `${actor.guildId === 'telegram' ? 'telegram' : 'discord'}:${id}`, sessionId, ...actor,
+                state: 'dispatching', createdAt: now, updatedAt: now, lastSeq: snapshot.cursor, startSeq: snapshot.cursor, payloadDigest, turn: null,
+                output: '', result: '', admitted: false, contaminated: false, bindingVersion,
+                ...(this.store.metadataOnly && actor.guildId !== 'telegram' ? { notificationPreferences: this.notificationPreferences(actor) } : {}),
+                notification: 'none', notifyAttempts: 0, nextNotifyAt: 0, lastError: '' };
+            this.store.create(run); // Durable intent BEFORE the only prompt call. Never replay uncertain dispatches.
+            try {
+                await this.adapter.prompt(sessionId, run.requestId, text);
+                run.state = 'accepted';
             }
-        }
-        if (terminal(run.state)) {
-            run.bodyDigest = digest(run.result);
-            this.planDelivery(run);
-        }
-        run.updatedAt = Date.now();
-        this.store.save(run);
-        return run;
+            catch (error) {
+                run.lastError = errorCode(error);
+                if (error instanceof DshRejected) {
+                    run.state = 'failed';
+                    run.result = 'DSHが送信を拒否しました。設定とセッション状態を確認してください。';
+                    run.notification = 'pending';
+                }
+                else {
+                    run.state = 'unknown';
+                    run.result = '送信結果が不明です。再送せず履歴を照合中です。';
+                }
+            }
+            if (terminal(run.state)) {
+                run.bodyDigest = digest(run.result);
+                this.planDelivery(run);
+            }
+            run.updatedAt = Date.now();
+            this.store.save(run);
+            return run;
+        });
     }
     checkOwner(actor, run) {
         if (run.userId !== actor.userId || run.guildId !== actor.guildId || run.channelId !== actor.channelId)
@@ -265,7 +293,7 @@ export class Engine {
         if (run.startSeq === undefined)
             throw new AppError('BODY_UNAVAILABLE', '本文の復元情報がありません。PCで確認してください。');
         const previousState = run.state;
-        const replay = { ...run, state: 'unknown', lastSeq: run.startSeq, turn: null, admitted: false, contaminated: false, output: '', result: '', finalText: undefined, originalFinalDigest: undefined, delivery: undefined };
+        const replay = { ...run, state: 'unknown', lastSeq: run.startSeq, turn: null, startStep: undefined, admitted: false, contaminated: false, output: '', result: '', finalText: undefined, originalFinalDigest: undefined, delivery: undefined };
         const snapshot = await this.adapter.snapshot(run.sessionId);
         this.consume(replay, await this.adapter.events(run.sessionId, snapshot.cursor, run.startSeq));
         if (terminal(previousState) && (!replay.admitted || replay.turn === null || replay.state !== previousState))
@@ -281,6 +309,7 @@ export class Engine {
         run.originalFinalDigest = replay.originalFinalDigest;
         run.lastSeq = replay.lastSeq;
         run.turn = replay.turn;
+        run.startStep = replay.startStep;
         run.admitted = replay.admitted;
         run.contaminated = replay.contaminated;
         if (!terminal(previousState) && replay.admitted) {
@@ -294,9 +323,14 @@ export class Engine {
     }
     consume(run, events) {
         for (const event of events) {
-            if (event.type === 'turn/start' && typeof event.data.turn === 'number' && !run.admitted) {
+            if (event.type === 'turn/start' && Number.isSafeInteger(event.data.turn) && event.data.turn >= 0 && !run.admitted) {
                 run.turn = event.data.turn;
+                run.startStep = undefined;
                 run.contaminated = false;
+            }
+            if (event.type === 'step/start' && run.turn !== null && event.data.turn === run.turn
+                && Number.isSafeInteger(event.data.step) && event.data.step >= 0) {
+                run.startStep = { turn: run.turn, step: event.data.step, seq: event.seq };
             }
             if (event.type === 'user/message' && event.surfaceOp === 'append') {
                 const source = object(event.data.source);
@@ -307,6 +341,13 @@ export class Engine {
                     run.state = 'running';
                     run.result = '';
                     run.lastError = '';
+                    // Admission remains correlated by the existing exact rpcId contract. The
+                    // separate work notice needs stronger step-start evidence from Native.
+                    if (run.workStartedSeq === undefined && source.kind === 'user' && run.startStep?.turn === run.turn && run.startStep.seq < event.seq) {
+                        run.workStartedSeq = event.seq;
+                        if (this.store.metadataOnly && run.guildId !== 'telegram' && (!run.workNotice || run.workNotice === 'none'))
+                            run.workNotice = 'ready';
+                    }
                 }
                 else if (source.kind === 'user' && run.turn !== null) {
                     run.contaminated = true;
@@ -454,11 +495,66 @@ export class Engine {
             this.store.save(run);
         }
     }
-    async tick(notify) {
+    async deliverWorkingNotice(run, notify) {
+        if (run.workNotice !== 'ready')
+            return;
+        if (terminal(run.state) || run.contaminated) {
+            run.workNotice = 'suppressed';
+            run.workNoticeError = '';
+            this.store.save(run);
+            return;
+        }
+        if (!this.store.metadataOnly || run.guildId === 'telegram' || !run.notificationPreferences) {
+            run.workNotice = 'blocked';
+            run.workNoticeError = 'WORK_NOTICE_NOT_PINNED';
+            this.store.save(run);
+            return;
+        }
+        try {
+            this.policy.authorize(run.userId, run.guildId, run.channelId);
+            await this.session(run.sessionId, run);
+        }
+        catch (error) {
+            run.workNotice = 'blocked';
+            run.workNoticeError = errorCode(error);
+            this.store.save(run);
+            return;
+        }
+        // Persist the no-replay fence before Discord may accept the notice. A crash
+        // after send but before receipt persistence remains unknown and is never resent.
+        run.workNotice = 'unknown';
+        run.workNoticeAttempts = (run.workNoticeAttempts ?? 0) + 1;
+        run.workNoticeError = 'WORK_NOTICE_UNKNOWN';
+        run.updatedAt = Date.now();
+        this.store.save(run);
+        try {
+            const receipt = await notify(run);
+            if (!receipt || typeof receipt.messageId !== 'string' || !receipt.messageId) {
+                run.workNotice = 'unknown';
+                run.workNoticeError = 'MESSAGE_ID_UNAVAILABLE';
+            }
+            else {
+                run.workNotice = 'sent';
+                run.workNoticeMessageId = receipt.messageId;
+                run.workNoticeError = '';
+            }
+        }
+        catch (error) {
+            const code = errorCode(error);
+            run.workNoticeError = code;
+            if (['DELIVERY_BLOCKED', 'NOT_AUTHORIZED', 'CWD_NOT_ALLOWED'].includes(code))
+                run.workNotice = 'blocked';
+            // All other outcomes remain unknown. There is no automatic start-notice replay.
+        }
+        run.updatedAt = Date.now();
+        this.store.save(run);
+    }
+    async tick(notify, notifyWorking) {
         if (this.ticking)
             return;
         this.ticking = true;
         try {
+            const verifiedWorkingRuns = new Set();
             for (const stored of this.store.active()) {
                 if (stored.state === 'dispatching')
                     continue; // An in-flight submit owns this row until it settles.
@@ -471,6 +567,8 @@ export class Engine {
                     this.consume(run, events);
                     run.updatedAt = Date.now();
                     this.store.save(run);
+                    if (run.workNotice === 'ready' && run.workStartedSeq !== undefined && run.startStep !== undefined && run.startStep.seq < run.workStartedSeq)
+                        verifiedWorkingRuns.add(run.id);
                 }
                 catch (error) {
                     // No partial cursor or output commit on a failed read. Do NOT infer success from idle.
@@ -478,6 +576,20 @@ export class Engine {
                     stored.updatedAt = Date.now();
                     this.store.save(stored);
                 }
+            }
+            for (const run of this.store.pendingWorkingNotices()) {
+                if (terminal(run.state) || run.contaminated) {
+                    run.workNotice = 'suppressed';
+                    run.workNoticeError = '';
+                    this.store.save(run);
+                    continue;
+                }
+                // Ready markers may survive restart, but delivery is gated on a fresh
+                // complete, digest-checked Native observation in this tick.
+                if (!verifiedWorkingRuns.has(run.id))
+                    continue;
+                if (notifyWorking)
+                    await this.deliverWorkingNotice(run, notifyWorking);
             }
             for (const run of this.store.pendingNotifications()) {
                 if (this.store.metadataOnly && run.guildId !== 'telegram') {

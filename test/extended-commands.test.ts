@@ -7,7 +7,7 @@ import { Store } from '../src/store.js';
 import { Policy } from '../src/policy.js';
 import { AppError } from '../src/errors.js';
 import type { Config } from '../src/config.js';
-import type { AgentAdapter, SessionInfo, Snapshot, WireEvent } from '../src/types.js';
+import type { AgentAdapter, ModelCatalog, SessionInfo, SessionRenameValue, Snapshot, WireEvent } from '../src/types.js';
 const actor: Actor = { userId: '111111111111111111', guildId: '222222222222222222', channelId: '333333333333333333' };
 function interaction(sub: string, values: Record<string, string | number | boolean> = {}, group: string | null = null, changes: Partial<Actor> = {}): ChatInputCommandInteraction {
   return { commandName: 'agent', id: 'extended-run', user: { id: changes.userId ?? actor.userId, bot: false }, guildId: changes.guildId ?? actor.guildId, channelId: changes.channelId ?? actor.channelId,
@@ -17,11 +17,21 @@ function interaction(sub: string, values: Record<string, string | number | boole
 }
 class Adapter implements AgentAdapter {
   rows: SessionInfo[] = [{ sessionId: 'native-session', title: '日本語😀', cwd: process.cwd(), running: false, subagent: false, updatedAt: 1 }];
-  listCalls = 0; creates = 0; prompts = 0; log: WireEvent[] = []; revoke: (() => void) | undefined;
+  listCalls = 0; creates = 0; prompts = 0; catalogCalls = 0; renameCalls: Array<{ sessionId: string; title: string }> = []; log: WireEvent[] = []; revoke: (() => void) | undefined;
+  inbox: Record<string, unknown> = { 'next-turn': [], 'next-step': [] };
+  catalog: ModelCatalog = { default: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'medium' }, routableProviders: ['provider-a'],
+    groups: [{ id: 'provider-a', name: 'Provider A', models: [{ id: 'model-a', name: 'Model A', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }], defaultEffort: 'medium' } }] }], failedProviders: 1 };
   async list(): Promise<SessionInfo[]> { this.listCalls++; this.revoke?.(); return this.rows; }
   async create(): Promise<string> { this.creates++; return 'new'; }
   async prompt(): Promise<void> { this.prompts++; }
-  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? -1, values: {} }; }
+  async modelCatalog(): Promise<ModelCatalog> { this.catalogCalls++; return this.catalog; }
+  async rename(request: { sessionId: string; title: string }): Promise<SessionRenameValue> {
+    this.renameCalls.push(request); const row = this.rows.find(value => value.sessionId === request.sessionId);
+    if (!row) throw new AppError('SESSION_NOT_FOUND', 'not found'); row.title = request.title;
+    const seq = (this.log.at(-1)?.seq ?? -1) + 1; this.log.push({ seq, time: 1, type: 'session/title', data: { title: request.title } });
+    return { title: request.title, seq };
+  }
+  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? -1, values: { inbox: this.inbox, title: this.rows[0]?.title } }; }
   async events(_id: string, through: number, after: number): Promise<WireEvent[]> { return this.log.filter(event => event.seq > after && event.seq <= through); }
   async history(): Promise<Array<{ seq: number; role: 'assistant'; text: string; reasoning?: string; tool?: string }>> { return [{ seq: 0, role: 'assistant', text: '安全😀'.repeat(300), reasoning: 'PRIVATE_REASONING', tool: 'PRIVATE_TOOL' }]; }
 }
@@ -62,6 +72,34 @@ test('session emoji titles and workspace aliases remain within response UTF16 bu
   config.workspaces = Object.fromEntries(Array.from({ length: 40 }, (_, n) => [`${n}😀${'*'.repeat(80)}`, process.cwd()]));
   for (const page of [1, 2]) { const response = await handleAgentCommand(interaction('workspaces', { page }), engine, config, true); assert.ok(response.content.length <= 2000); assert.ok(!response.content.includes(process.cwd())); }
 });
+test('/agent models displays filtered per-model Native reasoning metadata without provider failure details', async t => {
+  const { engine, adapter, config } = await setup(t);
+  const response = await handleAgentCommand(interaction('models', { query: 'low', page: 1 }), engine, config, true);
+  assert.match(response.content, /Native model catalog（read-only/u);
+  assert.match(response.content, /Model A/u); assert.match(response.content, /Low \(low\)/u);
+  assert.match(response.content, /Host既定（Session設定とは別）/u);
+  assert.match(response.content, /取得できないprovider: 1（詳細は非表示）/u);
+  assert.ok(response.content.length <= 2000); assert.equal(adapter.catalogCalls, 1);
+});
+
+test('/agent settings title requires no-CAS confirmation, serializes and readbacks the exact bound Session', async t => {
+  const { engine, adapter, config } = await setup(t); const beforeLists = adapter.listCalls;
+  await assert.rejects(handleAgentCommand(interaction('title', { value: 'renamed' }, 'settings'), engine, config, true), { code: 'CONFIRMATION_REQUIRED' });
+  assert.equal(adapter.listCalls, beforeLists); assert.equal(adapter.renameCalls.length, 0);
+  const response = await handleAgentCommand(interaction('title', { value: 'renamed', 'confirm-no-cas': true }, 'settings'), engine, config, true);
+  assert.deepEqual(adapter.renameCalls, [{ sessionId: 'native-session', title: 'renamed' }]);
+  assert.equal(adapter.rows[0]!.title, 'renamed'); assert.match(response.content, /readback確認/u); assert.match(response.content, /Native title CASはありません/u);
+});
+
+test('title mutation fails closed on unknown queue or tracked busy Run', async t => {
+  const { engine, adapter, config, store } = await setup(t); adapter.inbox = {};
+  await assert.rejects(handleAgentCommand(interaction('title', { value: 'must-not-change', 'confirm-no-cas': true }, 'settings'), engine, config, true), { code: 'SESSION_STATE_UNKNOWN' });
+  assert.equal(adapter.renameCalls.length, 0); adapter.inbox = { 'next-turn': [], 'next-step': [] };
+  await engine.submit(actor, 'active-title-run', 'prompt');
+  await assert.rejects(handleAgentCommand(interaction('title', { value: 'must-not-change', 'confirm-no-cas': true }, 'settings'), engine, config, true), { code: 'SESSION_BUSY' });
+  assert.equal(adapter.renameCalls.length, 0); assert.equal(store.get('active-title-run')!.state, 'accepted');
+});
+
 test('unsupported stale history command fetches no Native private events or projected text', async t => {
   const { engine, adapter, config } = await setup(t); const before = adapter.listCalls;
   adapter.history = async () => assert.fail('unsupported history must not fetch');

@@ -90,12 +90,14 @@ async function setup(t: { after: (fn: () => unknown) => void }) {
   return { dir, config, store, adapter, engine };
 }
 
-test('command schema stays within Discord option limits and excludes unverified writes/history', () => {
+test('command schema stays within Discord option limits and registers only verified catalog/title writes', () => {
   const schema = command.toJSON() as unknown as { options: Array<{ name: string; type: number; options?: Array<{ name: string; type: number; options?: unknown[] }> }> };
-  assert.equal(schema.options.length, 15);
+  assert.equal(schema.options.length, 18);
   assert.ok(schema.options.length <= 25);
   const names = new Set(schema.options.map(option => option.name));
-  for (const forbidden of ['history', 'models', 'model', 'reasoning', 'context', 'settings', 'stop', 'approval', 'queue', 'files']) assert.equal(names.has(forbidden), false);
+  assert.equal(names.has('models'), true);
+  assert.equal(names.has('settings'), true);
+  for (const forbidden of ['history', 'model', 'reasoning', 'context', 'stop', 'approval', 'queue', 'files']) assert.equal(names.has(forbidden), false);
   for (const root of schema.options) {
     assert.ok((root.options?.length ?? 0) <= 25, `${root.name} options exceed limit`);
     for (const child of root.options ?? []) assert.ok((child.options?.length ?? 0) <= 25, `${root.name}.${child.name} options exceed limit`);
@@ -145,7 +147,7 @@ test('current, workspace alias, and task views show only authorized summary fiel
   const current = await handleAgentCommand(interaction('current'), engine, config, true);
   assert.match(current.content, /Session ID: old-session-id/u);
   assert.match(current.content, /Workspace: test/u);
-  assert.match(current.content, /Busy: 実行中／処理待ちあり/u);
+  assert.match(current.content, /Busy: 実行中/u);
   assert.match(current.content, /Binding version: 1/u);
   assert.doesNotMatch(current.content, new RegExp(config.workspaces.test!.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   adapter.rows[0]!.running = false;
@@ -181,7 +183,7 @@ test('notification scope confirmation and status counters are explicit', async t
   assert.match(set.content, /今後のRun/u);
 });
 
-test('unregistered model/settings/stop operations fail with zero Native side effects', async t => {
+test('unsupported model writes/settings reset/stop operations fail with zero Native side effects', async t => {
   const { engine, config, adapter, store } = await setup(t);
   const beforeBinding = engine.binding(actor);
   const beforeCalls = { list: adapter.listCalls, prompt: adapter.promptCalls, create: adapter.createCalls, snapshot: adapter.snapshotCalls, events: adapter.eventCalls };
@@ -189,10 +191,13 @@ test('unregistered model/settings/stop operations fail with zero Native side eff
     await assert.rejects(handleAgentCommand(interaction(name), engine, config, true), { code: 'UNKNOWN_COMMAND' });
   }
   const help = await handleAgentCommand(interaction('help', { topic: 'model' }), engine, config, true);
-  assert.match(help.content, /model catalog/u);
+  assert.match(help.content, /read-only catalog/u);
   adapter.history = async () => { adapter.historyCalls++; return []; };
   const diagnose = await handleAgentCommand(interaction('diagnose'), engine, config, true);
-  assert.match(diagnose.content, /History: unavailable（official field-filtered Native contract unverified）/u);
+  assert.match(diagnose.content, /History: unavailable（Native pageにevent\/field filterなし）/u);
+  assert.match(diagnose.content, /model catalog: unavailable/u);
+  assert.match(diagnose.content, /Session title rename: unavailable/u);
+  assert.match(diagnose.content, /model\/reasoning選択はHost既定も変える可能性があり未対応/u);
   assert.equal(adapter.historyCalls, 0);
   assert.deepEqual({ list: adapter.listCalls, prompt: adapter.promptCalls, create: adapter.createCalls, snapshot: adapter.snapshotCalls, events: adapter.eventCalls }, { ...beforeCalls, list: beforeCalls.list + 1 });
   assert.equal(engine.binding(actor), beforeBinding);

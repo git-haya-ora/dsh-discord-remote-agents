@@ -142,3 +142,32 @@ test('binding ABA or authorization changes after building metadata invalidate it
   assert.throws(() => built.assertCurrent(), { code: 'BINDING_CONFLICT' });
   const current = await connectionNotice(f.engine, f.config, [f.actor]); f.config.allowedChannelIds.clear(); assert.throws(() => current.assertCurrent(), { code: 'NOT_AUTHORIZED' });
 });
+
+test('stop does not wait for blocked recipient lookup and late lookup cannot initiate a send', async t => {
+  const f = await fixture(t, true); let release!: (value: { id: string; send(options: unknown): Promise<{ id: string }> }) => void;
+  let started!: () => void; const lookupStarted = new Promise<void>(resolve => { started = resolve; });
+  const lookup = new Promise<{ id: string; send(options: unknown): Promise<{ id: string }> }>(resolve => { release = resolve; });
+  let sends = 0, destroys = 0;
+  Object.defineProperty(f.bot.client.users, 'fetch', { configurable: true, value: () => { started(); return lookup; } });
+  Object.defineProperty(f.bot.client, 'destroy', { configurable: true, value: async () => { destroys++; } });
+  const notice = f.bot.notifyConnected(); await lookupStarted;
+  const stopped = await Promise.race([f.bot.stop().then(() => true), new Promise<boolean>(resolve => setTimeout(() => resolve(false), 250))]);
+  assert.equal(stopped, true); assert.equal(destroys, 1);
+  release({ id: userId, send: async () => { sends++; return { id: '555555555555555555' }; } });
+  assert.deepEqual(await notice, { sent: 0, failed: 1 }); assert.equal(sends, 0); assert.equal(f.prompts(), 0);
+});
+
+test('stop returns during blocked send and keeps durable unknown fence after late success', async t => {
+  const f = await fixture(t, true); let release!: (value: { id: string }) => void; let started!: () => void;
+  const sendStarted = new Promise<void>(resolve => { started = resolve; });
+  const blockedSend = new Promise<{ id: string }>(resolve => { release = resolve; });
+  const writes: Array<{ state: string; messageId?: string }> = []; const setSetting = f.engine.store.setSetting.bind(f.engine.store);
+  f.engine.store.setSetting = (key, value) => { writes.push(JSON.parse(value) as { state: string; messageId?: string }); setSetting(key, value); };
+  Object.defineProperty(f.bot.client.users, 'fetch', { configurable: true, value: async () => ({ send: () => { started(); return blockedSend; } }) });
+  Object.defineProperty(f.bot.client, 'destroy', { configurable: true, value: async () => {} });
+  const notice = f.bot.notifyConnected(); await sendStarted;
+  const stopped = await Promise.race([f.bot.stop().then(() => true), new Promise<boolean>(resolve => setTimeout(() => resolve(false), 250))]);
+  assert.equal(stopped, true); assert.deepEqual(writes, [{ state: 'unknown' }]);
+  release({ id: '555555555555555555' }); assert.deepEqual(await notice, { sent: 0, failed: 1 });
+  assert.deepEqual(writes, [{ state: 'unknown' }]);
+});

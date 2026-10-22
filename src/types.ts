@@ -1,4 +1,10 @@
 export interface SessionModel { provider: string; model: string; reasoningEffort?: string }
+export interface CatalogEffort { id: string; name: string }
+export interface CatalogModel { id: string; name: string; reasoning?: { efforts: CatalogEffort[]; defaultEffort?: string } }
+export interface CatalogGroup { id: string; name: string; models: CatalogModel[] }
+// Safe Host DTO: raw provider failure messages are intentionally discarded by the adapter.
+export interface ModelCatalog { default: SessionModel; routableProviders: string[]; groups: CatalogGroup[]; failedProviders: number }
+export interface SessionRenameValue { title: string; seq: number }
 export interface SessionInfo {
   sessionId: string; cwd?: string; running: boolean; title: string;
   subagent: boolean; updatedAt: number;
@@ -21,6 +27,8 @@ export interface Run {
   payloadDigest?: string; startSeq?: number; bodyMissing?: boolean;
   bodyDigest?: string; finalText?: string | undefined; originalFinalDigest?: string | undefined; delivery?: DeliveryPlan | undefined;
   notificationPreferences?: NotificationPreferences; bindingVersion?: number;
+  startStep?: { turn: number; step: number; seq: number } | undefined;
+  workStartedSeq?: number; workNotice?: 'none' | 'ready' | 'sent' | 'unknown' | 'blocked' | 'suppressed'; workNoticeMessageId?: string; workNoticeAttempts?: number; workNoticeError?: string;
   notification: 'none' | 'pending' | 'sent' | 'unknown'; notifyAttempts: number; nextNotifyAt: number; lastError: string;
 }
 export const terminal = (state: RunState): boolean => ['succeeded', 'failed', 'interrupted'].includes(state);
@@ -30,4 +38,7 @@ export interface AgentAdapter {
   snapshot(sessionId: string): Promise<Snapshot>;
   events(sessionId: string, throughSeq: number, afterSeq: number): Promise<WireEvent[]>;
   prompt(sessionId: string, requestId: string, text: string): Promise<void>;
+  modelCatalog?(): Promise<ModelCatalog>;
+  rename?(request: { sessionId: string; title: string }): Promise<SessionRenameValue>;
+  verifySession?(sessionId: string): Promise<void>;
 }

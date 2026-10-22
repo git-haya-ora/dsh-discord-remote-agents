@@ -22,7 +22,7 @@ class Adapter implements AgentAdapter {
   rows: SessionInfo[] = []; log: WireEvent[] = []; promptCalls = 0; reject = false;
   async list(): Promise<SessionInfo[]> { return this.rows; }
   async create(): Promise<string> { return 'session'; }
-  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? -1, values: {} }; }
+  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? -1, values: { inbox: { 'next-turn': [], 'next-step': [] } } }; }
   async events(_id: string, through: number, after: number): Promise<WireEvent[]> { return this.log.filter(e => e.seq > after && e.seq <= through); }
   async prompt(): Promise<void> { this.promptCalls++; if (this.reject) throw new DshRejected('DSH_REJECTED', 'test'); }
 }

@@ -82,6 +82,21 @@ export class DshAdapter implements AgentAdapter {
           updatedAt: item.updatedAt, title: typeof values.title === 'string' ? values.title : '(無題)',
           subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string' };
         if (typeof item.cwd === 'string') info.cwd = item.cwd;
+        // Keep only the official last-used/next model projection; neither is claimed as an active Run model.
+        const selection = values.modelSelection;
+        if (selection && typeof selection === 'object' && !Array.isArray(selection)) {
+          const model = (value: unknown): SessionInfo['lastUsedModel'] => {
+            if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+            const candidate = value as Record<string, unknown>;
+            const valid = (field: unknown): field is string => typeof field === 'string' && field.length > 0 && field.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(field);
+            if (!valid(candidate.provider) || !valid(candidate.model) || candidate.reasoningEffort !== undefined && !valid(candidate.reasoningEffort)) return undefined;
+            return { provider: candidate.provider, model: candidate.model, ...(candidate.reasoningEffort === undefined ? {} : { reasoningEffort: candidate.reasoningEffort }) };
+          };
+          const lastUsedModel = model((selection as Record<string, unknown>).lastUsed);
+          const nextModel = model((selection as Record<string, unknown>).next);
+          if (lastUsedModel) info.lastUsedModel = lastUsedModel;
+          if (nextModel) info.nextModel = nextModel;
+        }
         result.push(info);
       }
       if (page.nextCursor === undefined) return result;

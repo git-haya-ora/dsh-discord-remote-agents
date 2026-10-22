@@ -133,6 +133,10 @@ export class Store {
     return this.db.prepare("SELECT payload FROM runs WHERE state IN ('succeeded','failed','interrupted') ORDER BY rowid").all()
       .map(row => this.decode(row)!).filter(run => run.notification === 'pending' && run.nextNotifyAt <= now);
   }
+  pendingWorkingNotices(): Run[] {
+    return this.db.prepare('SELECT payload FROM runs ORDER BY rowid').all().map(row => this.decode(row)!)
+      .filter(run => run.workNotice === 'ready');
+  }
   latest(userId: string, guildId: string, channelId: string): Run | undefined {
     return this.db.prepare('SELECT payload FROM runs WHERE user_id=? ORDER BY rowid DESC').all(userId)
       .map(row => this.decode(row)!).find(run => run.guildId === guildId && run.channelId === channelId);
