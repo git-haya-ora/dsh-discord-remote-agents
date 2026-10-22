@@ -31,7 +31,7 @@ class FakeAdapter implements AgentAdapter {
   rows: SessionInfo[] = []; log: WireEvent[] = []; prompts: { sessionId: string; requestId: string; text: string }[] = [];
   async list(): Promise<SessionInfo[]> { return this.rows; }
   async create(cwd: string): Promise<string> { this.rows.push({ sessionId: 'new', cwd, running: false, title: '', subagent: false, updatedAt: 1 }); return 'new'; }
-  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? -1, values: { inbox: { 'next-turn': [], 'next-step': [] } } }; }
+  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? 0, values: { inbox: { 'next-turn': [], 'next-step': [] } } }; }
   async events(_id: string, through: number, after: number): Promise<WireEvent[]> { return this.log.filter(e => e.seq > after && e.seq <= through); }
   async prompt(sessionId: string, requestId: string, text: string): Promise<void> { this.prompts.push({ sessionId, requestId, text }); }
 }
@@ -109,9 +109,9 @@ test('sessions, selection, multiline prompt and result use shared engine; duplic
   await bot.handleUpdate(update(2, '/bind tg-session')); const command = update(3, '/prompt first line\nsecond line'); await bot.handleUpdate(command); await bot.handleUpdate(command);
   assert.equal(adapter.prompts.length, 1); assert.equal(adapter.prompts[0]?.text, 'first line\nsecond line'); assert.equal(adapter.prompts[0]?.requestId, 'telegram:tg-123456-3');
   const event = (seq: number, type: string, data: Record<string, unknown>, surfaceOp?: string): WireEvent => ({ seq, type, data, time: 1, ...(surfaceOp ? { surfaceOp } : {}) });
-  adapter.log = [event(0, 'turn/start', { turn: 1 }), event(1, 'user/message', { role: 'user', source: { kind: 'user', rpcId: 'telegram:tg-123456-3' } }, 'append'),
-    event(2, 'assistant/message', { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: `done ${TOKEN}` }, { type: 'reasoning', text: 'private' }] } }, 'append'),
-    event(3, 'turn/end', { turn: 1, reason: { kind: 'completed' } })];
+  adapter.log = [event(1, 'turn/start', { turn: 1 }), event(2, 'user/message', { role: 'user', source: { kind: 'user', rpcId: 'telegram:tg-123456-3' } }, 'append'),
+    event(3, 'assistant/message', { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: `done ${TOKEN}` }, { type: 'reasoning', text: 'private' }] } }, 'append'),
+    event(4, 'turn/end', { turn: 1, reason: { kind: 'completed' } })];
   await engine.tick(run => bot.notify(run)); assert.equal(store.get('tg-123456-3')?.state, 'succeeded'); assert.equal(store.get('tg-123456-3')?.notification, 'sent');
   assert.match(String(api.messages().at(-1)?.text), /done \[REDACTED\]/); assert.equal(String(api.messages().at(-1)?.text).includes('private'), false);
   await bot.handleUpdate(update(4, '/status')); assert.match(String(api.messages().at(-1)?.text), /完了/);

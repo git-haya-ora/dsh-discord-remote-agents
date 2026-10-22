@@ -5,7 +5,7 @@
 ## 範囲と優先順
 
 1. A：一覧・現在対象・Run一覧・診断、read-only model catalog、明示no-CAS同意付きtitle rename、実Native start相関後の「作業中」通知を実装。filtered historyはfield-filtered契約がなく未登録。
-2. A：全文を順序付きpartへ分割する通知。Native相関・固定先・digest・各part状態・不明配送非再送を維持する。送信完了後7日以内の保護durable出力／参照aware retentionはまだ未統合。
+2. A：全文を順序付きpartへ分割する通知。Native相関・固定先・digest・各part状態・不明配送非再送を維持する。終端本文/partのDPAPI保護保存、readback、intent/quota、確定receipt後7日retentionとexact-ref cleanupを部分実装。90日metadata pruning、全process-kill/cross-process quota proof、official Native receipt、live acceptanceは未完了。
 3. A：model/reasoning mutationはHost既定も変更するNative APIのため無効。title renameはNative CASがなくDesktopとの競合を防げないため、明示同意・事前/事後Binding確認・readbackが必要でもfull AC-44/45保証ではない。context token/timingは真のcontext使用量として表示しない。
 4. B：DM-onlyは明示導入・受信の設計／実証対象。既存guild設定を自動移行せず、実Discord実証なしにDM受付を有効化しない。
 5. C：targeted stop・external approval・共有FIFO queue・添付/Artifact・通常chat・Native compact bridgeは、Native method/serviceが一部確認済みでもDiscord向けの認可/Run scope/durability/no-replay統合が未対応。Telegram追加開発はしない。
@@ -25,7 +25,7 @@
 
 ### 全文配送の実装境界
 
-OUT-01〜07のsource実装は[全文配送](<full-output.md>)、日常コマンドの登録・未対応理由は[コマンド資料](<new-commands.md>)に記録する。OUT-08はSQLite本文非平文、同一RunのNative履歴とdigest照合、本文参照7日期限まで。DPAPI保護payloadへの全文durable保存・参照-aware清掃は未統合であり、OUT-08全体を完了扱いにしない。history喪失時はmetadata-only statusを維持し、本文を取得不能とする。正式なmodel/settings/context契約、DM操作、Profile Cは引き続き無効。
+OUT-01〜07のsource実装は[全文配送](<full-output.md>)、日常コマンドの登録・未対応理由は[コマンド資料](<new-commands.md>)に記録する。OUT-08はBridge専用DPAPI protected output profile、durable intent／quota、terminal Run+manifestのatomic publish、readback／scope検証、全part確定receipt後7日retention／exact-ref cleanupまで部分実装した。unknown／未送信／blocked／prepared outputは保持し、orphanは自動削除しない。90日metadata pruning、完全な電源断/process-killと複数Store quota検証、official Native receiptとlive受入は未完了であり、OUT-08全体を完了扱いにしない。正式なmodel/settings/context契約、DM操作、Profile Cは引き続き無効。
 
 表中の検証対象は合格宣言ではない。実施した試験数、失敗・skip、配布artifact検査は[検証記録](<verification.md>)に追記する。実機未検証のACをmock成功で達成済みにしない。
 

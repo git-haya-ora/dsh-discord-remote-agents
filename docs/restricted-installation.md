@@ -35,7 +35,7 @@
 ## 4. データと秘密
 
 - 既定rootは `%LOCALAPPDATA%\DSHDiscordRemoteAgents\single-operator-text-v1`。非秘密の `dataRoot` overrideを使う場合も、絶対パスとprivate ACL/reparse検査に通る必要がある。
-- tokenは `secrets` 配下のCurrentUser DPAPI保護blob。`metadata` 配下の専用SQLiteは非秘密設定、Binding、intent/digest、Session/Run相関、通知状態を保持する。prompt／assistant／通知本文はこのbundleのSQLiteへ保存せず、必要時に認可を再検証して同じNative Session historyから復元する。DSH本体のhistory保存方針は別であり、pluginが暗号化したとは主張しない。
+- tokenは `secrets` 配下のCurrentUser DPAPI保護blob。`metadata` 配下の専用SQLiteは非秘密設定、Binding、Run相関、digest、protected-output intent/manifest、通知状態を保持する。prompt本文は保存せず、終端Runのredacted回答と配送partは別namespaceの`protected-output`配下にランダムopaque refでDPAPI保護保存し、SQLiteへ平文保存しない。読み出しでは同じRun／Session／actor／Binding／destination／deployment scopeを照合する。全partの確定sent receipt後7日で記録済みrefだけを削除し、unknown／未送信／blockedは保持する。metadata/tombstoneの90日pruningは未実装。容量上限128 MiBにはSQLite/sidecar、payload、reservationを算入し、超過・不整合はfail closed。孤立payloadを自動清掃しない。
 - unsafe ACL・junction/reparse・想定外schemaはblockedとし、平文fallbackや自動権限修復を行わない。block理由を確認し、既存データを保全して対応する。
 - 旧CLIの平文SQLite、個人Binding、secretやfoundation実験DBは自動importしない。bundleのBindingは会話（Guild＋Channel/thread）共有。送信済みRunのSession・操作者・通知先は後続Binding変更で変わらない。
 

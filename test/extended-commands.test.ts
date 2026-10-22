@@ -31,7 +31,7 @@ class Adapter implements AgentAdapter {
     const seq = (this.log.at(-1)?.seq ?? -1) + 1; this.log.push({ seq, time: 1, type: 'session/title', data: { title: request.title } });
     return { title: request.title, seq };
   }
-  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? -1, values: { inbox: this.inbox, title: this.rows[0]?.title } }; }
+  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? 0, values: { inbox: this.inbox, title: this.rows[0]?.title } }; }
   async events(_id: string, through: number, after: number): Promise<WireEvent[]> { return this.log.filter(event => event.seq > after && event.seq <= through); }
   async history(): Promise<Array<{ seq: number; role: 'assistant'; text: string; reasoning?: string; tool?: string }>> { return [{ seq: 0, role: 'assistant', text: '安全😀'.repeat(300), reasoning: 'PRIVATE_REASONING', tool: 'PRIVATE_TOOL' }]; }
 }
@@ -114,10 +114,10 @@ test('sessions authorization is rechecked after awaited Native list', async t =>
 test('metadata status remains succeeded with body unavailable; blocked backlog visible without disclosure', async t => {
   const { engine, adapter, config, store } = await setup(t); await engine.submit(actor, 'extended-run', 'prompt');
   adapter.log = [
-    { seq: 0, time: 0, type: 'turn/start', data: { turn: 1 } },
-    { seq: 1, time: 0, type: 'user/message', surfaceOp: 'append', data: { source: { kind: 'user', rpcId: 'discord:extended-run' } } },
-    { seq: 2, time: 0, type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'PRIVATE_FINAL' }] } } },
-    { seq: 3, time: 0, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }
+    { seq: 1, time: 0, type: 'turn/start', data: { turn: 1 } },
+    { seq: 2, time: 0, type: 'user/message', surfaceOp: 'append', data: { source: { kind: 'user', rpcId: 'discord:extended-run' } } },
+    { seq: 3, time: 0, type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'PRIVATE_FINAL' }] } } },
+    { seq: 4, time: 0, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }
   ];
   await engine.tick(async () => { throw new AppError('DELIVERY_BLOCKED', 'private raw failure'); });
   const run = store.get('extended-run')!; run.result = ''; run.output = ''; run.bodyMissing = true; store.save(run); adapter.log = [];

@@ -16,6 +16,12 @@ Reproduce offline tests using [canonical development](<canonical-development.md>
 - Distribution parity passed for 40 files, archive inspection for 41 files / 24 JavaScript modules, and the known-pattern public-source scan for 160 files. `npm audit` reported zero vulnerabilities. These heuristic checks do not guarantee absence of every secret or PII. Final archive SHA256: `a821c58b2d986efc9f9c86132b02cef7fe9459ab63a590f04ed118b283317a0c`.
 - This addition has not been installed or live-tested. No Discord token was read/tested, receiver started, commands registered, Native prompt submitted, or Git/npm publication performed for these checks. The installed restricted.7 Host-status evidence below is separate from this feature's offline tests.
 
+## OUT-08 partial protected-output checkpoint (0.2.0-restricted.8)
+
+- On Node v22.23.3 / npm 10.9.3, `npm ci --ignore-scripts` installed 26 packages; `npm audit` reported zero vulnerabilities. `npm test` rebuilt canonical TypeScript, plugin bundle and root distribution, then passed **278/278 tests, zero failures, zero skips** (94,027.6717 ms). The Windows DPAPI tests used synthetic CurrentUser-protected fixtures under a verified safe test parent; this is not live DSH/Discord acceptance.
+- `npm run verify:source` passed its known-pattern check (163 files; not universal secret/PII proof). `npm run pack:plugin` generated a 41-file archive; `node tools/verify-bundle.mjs dsh-discord-remote-agents-0.2.0-restricted.8.tgz` passed with 24 inspected JavaScript modules. The helper remains hash-pinned in canonical and root distribution.
+- This checkpoint verifies local terminal output protection/readback, atomic Run+manifest publication, restart recovery, receipt-based 7-day exact-ref deletion, quota fences, SQLite plaintext exclusion, A→B→A binding-race refusal and Host disposal/preflight lifecycle in synthetic fixtures. It does not establish full power-loss/process-kill recovery, competing multi-Store quota correctness, 90-day tombstone pruning, a formal Native producer receipt/provenance, or live Host/Discord behavior. No token, live prompt, command registration, package publication or deployment was used.
+
 ## Optional workspace setup (0.2.0-restricted.6, historical stage)
 
 - Saving/connecting accepts an empty workspace allowlist. Blank GUI rows do not make a folder mandatory; partially completed or invalid rows still fail locally. No folder access is granted by connecting alone.

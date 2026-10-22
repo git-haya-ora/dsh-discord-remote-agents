@@ -134,7 +134,7 @@ tokenは送信時に入力欄から消えます。保存済みtokenを表示す�
 
 `/agent models` はNative model catalogのread-only検索です。`/agent settings title value:<title> confirm-no-cas:true` は選択中の待機Sessionのタイトルを変更しreadbackを確認しますが、Native title CASがなくDesktopとの同時変更を保護できません。model/reasoning選択APIはHost既定も変更するため使いません。`/agent new` は作業フォルダー別名だけを受け付け、title/model/effort指定はできません。Native create自体は実行されてから新Sessionのmodern-page契約をprobeするため、probe失敗時は作成済みSessionが未bindで残る可能性があります。Telegramの追加開発も対象外です。
 
-結果本文の再取得は同じNative履歴の可用性に依存します。Bridge側の本文参照期限は完了から7日ですが、Native履歴の削除や全文の保護保存・保持を保証するものではありません。履歴が失われた場合、別の回答で代用せず取得不能と表示します。
+restricted-storage profileでは、終端したredacted本文と配送partをBridge専用のCurrentUser DPAPI payloadへ保護保存し、Native履歴が失われた後も同じRunの結果を再取得できます。すべての配送partの確定receipt後から7日で、そのRunの記録済みrefだけを削除します。`unknown`・未送信・blocked配送は期限削除せず保持します。SQLiteには本文を平文保存せず、実容量128 MiBのquotaを超える場合は新規受付を止めます。90日後のmetadata pruning、実Native receipt/live acceptance、全process-kill復旧保証は未完了です。詳しくは[本文保護・保持の境界](<docs/full-output.md>)を参照してください。
 
 ## 困ったとき・安全な使い方
 

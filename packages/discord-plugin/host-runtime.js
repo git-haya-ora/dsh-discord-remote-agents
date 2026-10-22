@@ -6,6 +6,7 @@ import { DiscordBot } from './runtime/bot.js';
 import { command } from './runtime/commands.js';
 import { NativeSessionAdapter } from './native-adapter.js';
 import { WindowsSecretStore, prepareAdmissionJournalRoot, isSecretRef } from './windows-secrets.js';
+import { WindowsProtectedPayloadStore } from './protected-payloads.js';
 
 export const RPC_CHANNEL = '/api';
 export const RPC_ENDPOINT = 'discord-remote-agents.manage';
@@ -94,14 +95,28 @@ function safeCode(error) {
   const known = new Set(['INVALID_REQUEST', 'INVALID_TOKEN', 'SETTINGS_INVALID', 'CONFIRMATION_REQUIRED', 'REVISION_CONFLICT', 'DISPOSED', 'MANAGEMENT_BUSY',
     'DATA_ROOT_REQUIRED', 'CONFIG_INVALID', 'PROFILE_CONFLICT', 'SETTINGS_CORRUPT', 'TOKEN_REQUIRED', 'DISCORD_AUTH', 'DISCORD_OFFLINE', 'DISCORD_FORBIDDEN', 'DISCORD_HTTP', 'DISCORD_RESPONSE_INVALID',
     'BOT_IDENTITY_MISMATCH', 'IDENTITY_PINNED', 'HOST_COMPATIBILITY_UNVERIFIED', 'RECEIVER_NOT_READY', 'COMMAND_REGISTRATION_UNKNOWN', 'SECRET_RETIRE_PENDING',
-    'PROTECTED_API_UNAVAILABLE', 'PROTECTED_STORE_UNSAFE_PATH', 'PROTECTED_LOGGING_POLICY', 'PROTECTED_STORE_FAILURE', 'INVALID_SECRET_PATH', 'DB_UNAVAILABLE', 'DB_VERSION', 'DB_CORRUPT', 'DSH_PROTOCOL', 'DSH_REMOTE_ERROR']);
+    'PROTECTED_API_UNAVAILABLE', 'PROTECTED_STORE_UNSAFE_PATH', 'PROTECTED_LOGGING_POLICY', 'PROTECTED_STORE_FAILURE', 'PROTECTED_PAYLOAD_API_UNAVAILABLE', 'PROTECTED_PAYLOAD_UNSAFE_PATH', 'PROTECTED_PAYLOAD_LOGGING_POLICY', 'PROTECTED_PAYLOAD_FAILURE', 'INVALID_PAYLOAD_PATH', 'INVALID_SECRET_PATH', 'DB_UNAVAILABLE', 'DB_VERSION', 'DB_CORRUPT', 'DSH_PROTOCOL', 'DSH_REMOTE_ERROR']);
   return known.has(error?.code) ? error.code : 'HOST_OPERATION_FAILED';
+}
+function awaitAbortable(operation, signal) {
+  if (signal?.aborted) return Promise.reject(new HostError('RECEIVER_NOT_READY'));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    const onAbort = () => { if (settled) return; settled = true; cleanup(); reject(new HostError('RECEIVER_NOT_READY')); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(operation).then(value => {
+      if (settled) return; settled = true; cleanup(); resolve(value);
+    }, error => {
+      if (settled) return; settled = true; cleanup(); reject(error);
+    });
+  });
 }
 /** Connected, restricted Host runtime. Internals are constructor-only test seams, never RPC inputs. */
 export class DiscordHost {
   constructor(ctx, config = {}, internals = {}) {
     this.ctx = ctx; this.internals = internals;
-    this.state = 'unconfigured'; this.lastError = ''; this.disposed = false; this.busy = false; this.bot = undefined; this.store = undefined;
+    this.state = 'unconfigured'; this.lastError = ''; this.disposed = false; this.busy = false; this.bot = undefined; this.store = undefined; this.startGeneration = 0;
     this.settingsState = { profile, revision: 0, settings: null, secretRef: null, bot: null, retireRefs: [] };
     this.nativeAbort = new AbortController(); this.lifecycleAbort = new AbortController();
     try {
@@ -137,6 +152,7 @@ export class DiscordHost {
           this.settingsState = parsed;
         }
         this.secretStore = this.internals.secretStore ?? new WindowsSecretStore(join(this.dataRoot, 'secrets'));
+        this.protectedPayloadStore = this.internals.protectedPayloadStore ?? new WindowsProtectedPayloadStore(join(this.dataRoot, 'protected-output'));
         this.store = store;
         this.adapter = new NativeSessionAdapter(this.ctx.sessionController, store, this.nativeAbort.signal);
         this.state = this.settingsState.settings ? 'stopped' : 'unconfigured';
@@ -198,9 +214,9 @@ export class DiscordHost {
         }
         switch (request.operation) {
           case 'save': await this.save(request, signal); break;
-          case 'start': await this.start(); this.confirmAutoStart(); break;
+          case 'start': await this.start(signal); this.confirmAutoStart(); break;
           case 'stop': this.store.setSetting('restricted-auto-start-confirmed', ''); await this.stop(); break;
-          case 'reconnect': await this.stop(); await this.start(); this.confirmAutoStart(); break;
+          case 'reconnect': await this.stop(); await this.start(signal); this.confirmAutoStart(); break;
           case 'deleteSecret': await this.deleteSecret(); break;
           case 'registerCommands': await this.registerCommands(signal); break;
         }
@@ -256,21 +272,27 @@ export class DiscordHost {
       if (!this.disposed && this.settingsState.settings?.autoStart && this.store.setting('restricted-auto-start-confirmed') === String(this.settingsState.revision)) {
         await this.start();
       }
-    } catch (error) { this.state = 'blocked'; this.lastError = safeCode(error); }
+    } catch (error) {
+      if (!this.disposed) { const code = safeCode(error); if (code === 'RECEIVER_NOT_READY') this.state = 'stopped'; else { this.state = 'blocked'; this.lastError = code; } }
+    }
     finally { this.busy = false; }
   }
-  async start() {
+  async start(signal = this.lifecycleAbort.signal) {
+    if (this.disposed) fail('DISPOSED');
     if (this.bot?.client?.isReady?.()) return;
     if (this.bot) await this.stop();
-    const settings = this.settingsState.settings; if (!settings) fail('SETTINGS_INVALID');
-    const candidate = await this.readToken();
-    const botIdentity = await validateBot(candidate, this.internals.fetcher ?? fetch, this.lifecycleAbort.signal);
-    if (botIdentity.applicationId !== settings.applicationId || this.settingsState.bot?.botId !== botIdentity.botId) fail('BOT_IDENTITY_MISMATCH');
+    if (this.disposed || signal.aborted) fail('RECEIVER_NOT_READY');
+    const generation = ++this.startGeneration;
+    const ensureCurrent = () => { if (this.disposed || signal.aborted || generation !== this.startGeneration) fail('RECEIVER_NOT_READY'); };
+    const settingsState = this.settingsState, settings = settingsState.settings; if (!settings) fail('SETTINGS_INVALID');
+    const candidate = await awaitAbortable(this.readToken(), signal); ensureCurrent();
+    const botIdentity = await validateBot(candidate, this.internals.fetcher ?? fetch, signal); ensureCurrent();
+    if (botIdentity.applicationId !== settings.applicationId || settingsState.bot?.botId !== botIdentity.botId || this.settingsState !== settingsState) fail('BOT_IDENTITY_MISMATCH');
     const config = productConfig(settings, candidate, '');
-    const policy = await Policy.create(config);
+    const policy = await awaitAbortable(Policy.create(config), signal); ensureCurrent();
     // Availability/protocol validation before advertising or starting native text capabilities.
-    await this.adapter.list(); this.nativeVerified = true;
-    const engine = new Engine(this.adapter, this.store, policy, [candidate], true);
+    await awaitAbortable(this.adapter.list(), signal); ensureCurrent(); this.nativeVerified = true;
+    const engine = new Engine(this.adapter, this.store, policy, [candidate], true, this.protectedPayloadStore, { applicationId: settings.applicationId, botId: botIdentity.botId }, true);
     engine.registerWorkspace = async (actor, alias, path, confirmed) => {
       policy.authorize(actor.userId, actor.guildId, actor.channelId);
       if (!confirmed) fail('CONFIRMATION_REQUIRED');
@@ -290,13 +312,14 @@ export class DiscordHost {
         });
       } finally { this.busy = false; }
     };
+    ensureCurrent();
     const bot = this.internals.createBot ? this.internals.createBot(config, engine) : new DiscordBot(config, engine, undefined, true);
-    this.state = 'connecting'; this.bot = bot; this.engine = engine;
+    ensureCurrent(); this.state = 'connecting'; this.bot = bot; this.engine = engine;
     try {
-      await bot.start();
-      if (this.disposed || bot.client?.isReady && !bot.client.isReady()) fail('RECEIVER_NOT_READY');
+      ensureCurrent(); await bot.start(); ensureCurrent();
+      if (bot.client?.isReady && !bot.client.isReady()) fail('RECEIVER_NOT_READY');
       this.state = 'connected';
-    } catch (error) { await bot.stop().catch(() => {}); this.bot = undefined; this.engine = undefined; this.state = 'stopped'; throw error; }
+    } catch (error) { await bot.stop().catch(() => {}); if (this.bot === bot) this.bot = undefined; if (this.engine === engine) this.engine = undefined; this.state = this.disposed ? 'disposed' : 'stopped'; throw error; }
     // Message failure is not a failed connection and must never trigger reconnect/prompt replay.
     this.connectionNoticeFailed = false;
     if (typeof bot.notifyConnected === 'function') {
@@ -309,6 +332,7 @@ export class DiscordHost {
     }
   }
   async stop() {
+    this.startGeneration++;
     const bot = this.bot;
     if (bot) { await bot.stop(); this.bot = undefined; this.engine = undefined; }
     this.state = this.settingsState.settings ? 'stopped' : 'unconfigured';
@@ -325,7 +349,7 @@ export class DiscordHost {
   }
   async dispose() {
     if (this.disposed) return;
-    this.disposed = true; this.lifecycleAbort.abort();
+    this.disposed = true; this.startGeneration++; this.lifecycleAbort.abort();
     // Await our in-flight management operation only; never cancel native Session agents.
     await Promise.allSettled([...(this.inFlight ?? [])]);
     await this.stop(); this.nativeAbort.abort();

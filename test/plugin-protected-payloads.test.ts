@@ -5,6 +5,7 @@ import { mkdtemp, readFile, readdir, writeFile, rm, link, copyFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join, resolve, basename } from 'node:path';
 import { spawn } from 'node:child_process';
+import { gzipSync } from 'node:zlib';
 import type { ProtectedPayloadInput, ExpectedPayload } from '../packages/discord-plugin/protected-payloads.js';
 const { WindowsProtectedPayloadStore: Store, ProtectedPayloadError: E, describePayload: describe } = await import(new URL('../../packages/discord-plugin/protected-payloads.js', import.meta.url).href) as typeof import('../packages/discord-plugin/protected-payloads.js');
 const { SQLiteRunOutboxJournal: Journal } = await import(new URL('../../packages/discord-plugin/run-outbox-journal.js', import.meta.url).href) as typeof import('../packages/discord-plugin/run-outbox-journal.js');
@@ -15,6 +16,15 @@ function prompt() {
 function notification() {
   return { kind: 'notification' as const, context: { backendIdentity: 'backend', nativeSessionId: 'native-session', agentId: 'agent', runId: 'local-run', clientRequestId: 'request', nativeRunIdOrEquivalent: 'native-run', promptDigest: describe(prompt()).digest, eventId: 'event', revision: 'revision', checkpoint: 'checkpoint with spaces', occurredAt: '2026-10-14T00:00:00.000Z', state: 'completed' as const, transport: 'discord' as const, botId: 'bot', guildId: 'guild', channelId: 'channel', threadId: null as string|null, ownerId: 'actor', bindingId: 'binding', bindingVersion: 0, workspaceAlias: 'workspace with spaces' }, text: 'Synthetic result 日本語 😀\nNo external transmission.' };
 }
+function bridgeOutput(text = 'Synthetic durable result 日本語 😀\nNo external transmission.') {
+  const itemDigest = createHash('sha256').update(text, 'utf8').digest('hex');
+  return { kind: 'bridge-output' as const, context: { profile: 'local-bridge-output-v1' as const, transport: 'discord' as const,
+    applicationId: 'application', botId: 'bot', nativeSessionId: 'native-session', bridgeRunId: 'bridge-run', clientRequestId: 'request', promptDigest: 'a'.repeat(64),
+    observedTurn: 3, bridgeStartSeq: 10, lastObservedSeq: 17, completionSource: 'native-turn' as const, terminalState: 'succeeded' as const,
+    ownerId: 'actor', guildId: 'guild', channelId: 'channel', threadId: null as null, bindingMode: 'actor' as const, bindingId: 'binding', bindingVersion: 2,
+    destination: 'dm' as const, preRedactionDigest: 'b'.repeat(64), redactedBodyDigest: 'c'.repeat(64), deliveryPlanDigest: 'd'.repeat(64),
+    itemKind: 'body' as const, itemIndex: 0, itemCount: 2, itemDigest }, text };
+}
 function invalid(value: unknown) { assert.throws(() => describe(value as ProtectedPayloadInput), (error: unknown) => { assert.ok(error instanceof E); assert.equal(error.code, 'INVALID_PAYLOAD'); assert.equal(error.message, 'INVALID_PAYLOAD'); return true; }); }
 function expected(input: ProtectedPayloadInput): ExpectedPayload { return { kind: input.kind, digest: describe(input).digest, context: input.context } as ExpectedPayload; }
 test('payload helper pin and namespace ship independently with reproducible LF bytes', async () => {
@@ -23,7 +33,9 @@ test('payload helper pin and namespace ship independently with reproducible LF b
   const helper = await readFile(new URL('../../packages/discord-plugin/protected-payloads.ps1', import.meta.url));
   assert.equal(helper.includes(13), false); assert.equal(createHash('sha256').update(helper).digest('hex'), pins[0]![1]);
   // Windows CreateProcess has a 32767-character command-line cap; no path-script fallback.
-  assert.ok(Buffer.from(helper.toString('utf8'), 'utf16le').toString('base64').length + 300 < 32767);
+  const compressed = gzipSync(helper).toString('base64');
+  const bootstrap = `$bytes=[Convert]::FromBase64String('${compressed}');$memory=[IO.MemoryStream]::new($bytes);$zip=[IO.Compression.GZipStream]::new($memory,[IO.Compression.CompressionMode]::Decompress);$reader=[IO.StreamReader]::new($zip,[Text.Encoding]::UTF8);try{[ScriptBlock]::Create($reader.ReadToEnd()).InvokeReturnAsIs()}finally{$reader.Dispose();[Array]::Clear($bytes,0,$bytes.Length)}`;
+  assert.ok(Buffer.from(bootstrap, 'utf16le').toString('base64').length + 300 < 32767);
   const attrs = await readFile(new URL('../../.gitattributes', import.meta.url), 'utf8');
   assert.ok(attrs.split('\n').includes('packages/discord-plugin/protected-payloads.ps1 text eol=lf'));
   const manifest = JSON.parse(await readFile(new URL('../../packages/discord-plugin/package.json', import.meta.url), 'utf8'));
@@ -47,6 +59,11 @@ test('canonical metadata description preserves Unicode/newlines and ignores obje
   assert.equal(first.digest, createHash('sha256').update(canonical, 'utf8').digest('hex')); assert.equal(first.byteLength, Buffer.byteLength(canonical));
   for (const text of [p.text.replace('\r\n','\n'), p.text.normalize('NFC'), p.text+' ']) assert.notEqual(describe({ ...p, text }).digest, first.digest);
   assert.notEqual(describe(notification()).digest, first.digest);
+  const output = bridgeOutput();
+  assert.match(describe(output).digest, /^[a-f0-9]{64}$/); assert.notEqual(describe({ ...output, text: output.text + ' changed' }).digest, describe(output).digest);
+  assert.notEqual(describe({ ...output, context: { ...output.context, destination: 'origin' } }).digest, describe(output).digest);
+  invalid({ ...output, context: { ...output.context, itemCount: 0 } });
+  invalid({ ...output, context: { ...output.context, unexpectedNativeReceipt: 'fabricated' } });
 });
 test('text limits count Unicode scalars, reject invalid types/Unicode/controls and never truncate', () => {
   const p = prompt(); const upper = describe({ ...p, text: '😀'.repeat(20000) }); assert.ok(upper.byteLength > 80000 && upper.byteLength <= 98304);
@@ -73,14 +90,26 @@ test('own-data snapshots reject accessors, hidden/symbol fields and proxies with
   assert.deepEqual(describe(inherited),describe(p)); assert.equal(calls,0);
 });
 test('digest binds every pinned context field and text, with no authority or lease fields', () => {
-  for (const payload of [prompt(),notification()]) {
+  for (const payload of [prompt(), notification(), bridgeOutput()]) {
     const digest = describe(payload).digest;
     for (const [field,value] of Object.entries(payload.context)) {
-      const replacement = field==='bindingVersion'?1:field==='threadId'?'thread':field==='promptDigest'?'a'.repeat(64):field==='state'?'failed':field==='occurredAt'?'2026-10-14T00:00:01.000Z':field==='transport'?null:`${value}-changed`;
-      if (field==='transport') continue;
-      assert.notEqual(describe({ ...payload,context:{...payload.context,[field]:replacement} } as ProtectedPayloadInput).digest,digest,field);
+      if (payload.kind === 'bridge-output' && field === 'completionSource') {
+        const alternate = { ...payload, context: { ...payload.context, completionSource: 'bridge-rejection', observedTurn: null, terminalState: 'failed' } };
+        assert.notEqual(describe(alternate as unknown as ProtectedPayloadInput).digest, digest, field); continue;
+      }
+      const replacement = field === 'bindingVersion' ? (value === 1 ? 2 : 1)
+        : field === 'threadId' ? 'thread' : ['promptDigest','redactedBodyDigest','deliveryPlanDigest','itemDigest','preRedactionDigest'].includes(field) ? (value === 'a'.repeat(64) ? 'e'.repeat(64) : 'a'.repeat(64))
+        : field === 'state' || field === 'terminalState' ? 'failed'
+        : field === 'occurredAt' ? '2026-10-14T00:00:01.000Z'
+        : field === 'transport' || field === 'profile' ? undefined
+        : field === 'observedTurn' ? 4 : field === 'bridgeStartSeq' ? 11 : field === 'lastObservedSeq' ? 18
+        : field === 'completionSource' ? 'bridge-rejection' : field === 'bindingMode' ? 'shared' : field === 'destination' ? 'origin'
+        : field === 'itemKind' ? 'part' : field === 'itemIndex' ? 1 : field === 'itemCount' ? 3
+        : field === 'kind' ? 'failed' : `${value}-changed`;
+      if (replacement === undefined) continue;
+      assert.notEqual(describe({ ...payload, context: { ...payload.context, [field]: replacement } } as ProtectedPayloadInput).digest, digest, field);
     }
-    invalid({...payload, context:{...payload.context,receiverGeneration:1}}); invalid({...payload,context:{...payload.context,leaseEpoch:1}});
+    invalid({ ...payload, context: { ...payload.context, receiverGeneration: 1 } }); invalid({ ...payload, context: { ...payload.context, leaseEpoch: 1 } });
   }
 });
 test('memory journal accepts stable canonical digest with fresh mock ref and pins original local metadata only', () => {
@@ -104,16 +133,25 @@ test('Host provider fails closed on unsupported platform and invalid roots/refs/
 });
 /** Synthetic fixture uses the SAME pinned logging/ACL/DPAPI helper, not an emulator.
  * Deliberately encrypt malformed logical bytes to test the production reader. */
+async function invokeFixtureHelper(helper:Buffer,request:Record<string,unknown>):Promise<{ok:boolean;code?:string;sizes?:number[]}>{
+ const compressed=gzipSync(helper).toString('base64'),bootstrap=`$bytes=[Convert]::FromBase64String('${compressed}');$memory=[IO.MemoryStream]::new($bytes);$zip=[IO.Compression.GZipStream]::new($memory,[IO.Compression.CompressionMode]::Decompress);$reader=[IO.StreamReader]::new($zip,[Text.Encoding]::UTF8);try{[ScriptBlock]::Create($reader.ReadToEnd()).InvokeReturnAsIs()}finally{$reader.Dispose();[Array]::Clear($bytes,0,$bytes.Length)}`;
+ const child=spawn('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(bootstrap,'utf16le').toString('base64')],{windowsHide:true,stdio:['pipe','pipe','pipe'],env:{SystemRoot:'C:\\Windows',WINDIR:'C:\\Windows'}});
+ return new Promise((resolvePromise,reject)=>{
+  let output='';const timer=setTimeout(()=>{child.kill();reject(Error('SYNTHETIC_HELPER_TIMEOUT'));},15000);
+  child.on('error',()=>{clearTimeout(timer);reject(Error('SYNTHETIC_HELPER_FAILURE'));});child.stdin.on('error',()=>{child.kill();});child.stderr.on('data',()=>{});child.stdout.on('data',chunk=>{output+=chunk.toString('utf8');});
+  child.on('close',code=>{clearTimeout(timer);try{const result=JSON.parse(output) as {ok:boolean;code?:string;sizes?:number[]};if(code===0&&result.ok===true||code!==0&&result.ok===false){resolvePromise(result);return;}reject(Error('SYNTHETIC_HELPER_FAILURE'));}catch{reject(Error('SYNTHETIC_HELPER_FAILURE'));}});
+  child.stdin.end(JSON.stringify(request));
+ });
+}
 async function putFixtureBytes(root:string,bytes:Buffer,ref=randomBytes(32).toString('hex')):Promise<string>{
  assert.match(ref,/^[a-f0-9]{64}$/);
  const helper=await readFile(new URL('../../packages/discord-plugin/protected-payloads.ps1',import.meta.url));
- await new Promise<void>((resolvePromise,reject)=>{
-  const child=spawn('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(helper.toString('utf8'),'utf16le').toString('base64')],{windowsHide:true,stdio:['pipe','pipe','pipe'],env:{SystemRoot:'C:\\Windows',WINDIR:'C:\\Windows'}});
-  let output='';const timer=setTimeout(()=>{child.kill();reject(Error('SYNTHETIC_HELPER_TIMEOUT'));},15000);
-  child.on('error',()=>{clearTimeout(timer);reject(Error('SYNTHETIC_HELPER_FAILURE'));});child.stdin.on('error',()=>{child.kill();});child.stderr.on('data',()=>{});child.stdout.on('data',chunk=>{output+=chunk.toString('utf8');});
-  child.on('close',code=>{clearTimeout(timer);try{const result=JSON.parse(output);if(code!==0&&result.ok===false&&['PROTECTED_PAYLOAD_FAILURE','PROTECTED_PAYLOAD_UNSAFE_PATH','PROTECTED_PAYLOAD_API_UNAVAILABLE','PROTECTED_PAYLOAD_LOGGING_POLICY'].includes(result.code)){reject(new E(result.code));return;}assert.equal(code,0);assert.equal(result.ok,true);resolvePromise();}catch{reject(Error('SYNTHETIC_HELPER_FAILURE'));}});
-  child.stdin.end(JSON.stringify({operation:'put',root,ref,value:bytes.toString('base64')}));
- });return ref;
+ const value=bytes.toString('base64'),estimate=await invokeFixtureHelper(helper,{operation:'estimate',root,values:[value]});
+ if(!estimate.ok) throw new E(estimate.code);
+ const maxBytes=estimate.sizes?.[0];assert.ok(Number.isSafeInteger(maxBytes)&&maxBytes!>0);
+ const stored=await invokeFixtureHelper(helper,{operation:'putBatch',root,items:[{ref,value,maxBytes}]});
+ if(!stored.ok) throw new E(stored.code);
+ return ref;
 }
 test('synthetic native DPAPI restart/binding/canonical corruption/mixed namespace/hardlink refusal', {skip:process.platform!=='win32'}, async t=>{
  const parent=resolve(await mkdtemp(join(process.env.DSH_DISCORD_TEST_PRIVATE_PARENT??tmpdir(),'dsh-payload-test-'))),root=join(parent,'payloads');assert.ok(basename(parent).startsWith('dsh-payload-test-'));
@@ -127,6 +165,15 @@ test('synthetic native DPAPI restart/binding/canonical corruption/mixed namespac
   const restarted=new Store(root),pin=expected(original),restored=await restarted.read(descriptor.ref,pin);
   assert.deepEqual(restored,{schemaVersion:1,...original});assert.ok(Object.isFrozen(restored)&&Object.isFrozen(restored.context));
   const notificationInput=notification(),n=await restarted.create(notificationInput);assert.deepEqual(await restarted.read(n.ref,expected(notificationInput)),{schemaVersion:1,...notificationInput});
+   const outputInput=bridgeOutput(),estimate=(await restarted.estimate([outputInput]))[0]!;assert.equal(estimate.digest,describe(outputInput).digest);assert.equal(estimate.byteLength,describe(outputInput).byteLength);
+   const outputRef=randomBytes(32).toString('hex');
+   const outputWrite=[{ref:outputRef,input:outputInput,reserveBytes:estimate.cipherBytes}];
+   await restarted.createManyWithRefs(outputWrite);await restarted.createManyWithRefs(outputWrite); // Exact refs and content are idempotent after a partial/crash restart.
+   assert.equal((await restarted.stats()).files.find(file=>file.ref===outputRef)?.bytes,estimate.cipherBytes);
+   assert.deepEqual(await restarted.readMany([{ref:outputRef,expected:expected(outputInput)}]),[{schemaVersion:1,...outputInput}]);
+   await assert.rejects(restarted.createManyWithRefs([{ref:outputRef,input:bridgeOutput(outputInput.text.replace('Synthetic','Synthetix')),reserveBytes:estimate.cipherBytes}]),/PROTECTED_PAYLOAD_MISMATCH/);
+   const deleted=await restarted.deleteMany([outputRef]);assert.deepEqual(deleted,[{ref:outputRef,deleted:true,bytes:estimate.cipherBytes}]);
+   assert.deepEqual(await restarted.deleteMany([outputRef]),[{ref:outputRef,deleted:false,bytes:0}]);
   const fresh=await restarted.create(original);assert.notEqual(fresh.ref,descriptor.ref);assert.equal(fresh.digest,descriptor.digest);
   const path=join(root,`payload-${descriptor.ref}.dpapi`),blob=await readFile(path);assert.equal(blob.includes(Buffer.from(original.text)),false);assert.equal(blob.includes(Buffer.from(JSON.stringify(original.context))),false);
   await assert.rejects(restarted.read(descriptor.ref,{...pin,digest:'a'.repeat(64)}),/PROTECTED_PAYLOAD_MISMATCH/);
@@ -135,11 +182,13 @@ test('synthetic native DPAPI restart/binding/canonical corruption/mixed namespac
   // Raw fixture bytes are DPAPI-protected by the genuine helper; malformed UTF8,
   // BOM/noncanonical whitespace, duplicate keys and schema/content tampering reject.
   const valid=Buffer.from(JSON.stringify({schemaVersion:1,...original}));
-  // Actual generic GetFullPath API failure and CreateNew collision are FAILURE,
-  // never a skippable observed-private-path refusal. Neither overwrites the blob.
-  const storageFailure=(error:unknown)=>{assert.ok(error instanceof E);assert.equal(error.code,'PROTECTED_PAYLOAD_FAILURE');return true;};
-  await assert.rejects(putFixtureBytes(`${root}\u0000invalid`,valid),storageFailure);
-  await assert.rejects(putFixtureBytes(root,valid,descriptor.ref),storageFailure);
+  // Malformed roots and exact CreateNew collisions are never a skippable refusal,
+  // observed-private-path refusal. Neither operation overwrites the blob.
+  const collision=Buffer.from(valid),lastByte=collision.length-1;collision[lastByte]=collision[lastByte]!^1;
+   const unsafePathFailure=(error:unknown)=>{assert.ok(error instanceof E);assert.equal(error.code,'PROTECTED_PAYLOAD_UNSAFE_PATH');return true;};
+   const storageFailure=(error:unknown)=>{assert.ok(error instanceof E);assert.equal(error.code,'PROTECTED_PAYLOAD_MISMATCH');return true;};
+  await assert.rejects(putFixtureBytes(`${root}\u0000invalid`,valid),unsafePathFailure);
+  await assert.rejects(putFixtureBytes(root,collision,descriptor.ref),storageFailure);
   assert.deepEqual(await readFile(path),blob);
   const largeInput={...original,text:'😀'.repeat(20000)},large=await restarted.create(largeInput);
   assert.equal((await restarted.read(large.ref,expected(largeInput))).text,largeInput.text);

@@ -1,25 +1,73 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { AppError, errorCode } from './errors.js';
 import { DshRejected, object } from './protocol.js';
 import { assistantText, boundedOutput, redact, finalAssistantText, digest, splitFinalOutput } from './output.js';
-import { bindingKey } from './store.js';
+import { bindingKey, MAX_ACTIVE_RUN_METADATA_RESERVE, PROTECTED_OUTPUT_RETENTION_MS } from './store.js';
 import { terminal } from './types.js';
+const protectedRejection = 'DSHが送信を拒否しました。設定とセッション状態を確認してください。';
+const protectedChunkCodepoints = 15000;
+const maxProtectedBodyCodepoints = 200000;
+function protectedBodyChunks(text) {
+    const codepoints = [...text];
+    if (codepoints.length > maxProtectedBodyCodepoints)
+        throw new AppError('PROTECTED_OUTPUT_TOO_LARGE', '保護出力の上限を超えました。出力を切り詰めず、PCで確認してください。');
+    const chunks = [];
+    for (let i = 0; i < codepoints.length; i += protectedChunkCodepoints)
+        chunks.push(codepoints.slice(i, i + protectedChunkCodepoints).join(''));
+    return chunks.length ? chunks : [''];
+}
 export class Engine {
     adapter;
     store;
     policy;
     secrets;
     sharedDiscordBindings;
+    protectedPayloadStore;
+    protectedIdentity;
+    protectedOutputRequired;
     ticking = false;
+    protectedOutputLock = Promise.resolve();
     sessionMutations = new Set();
+    protectedOutputFault;
     registerWorkspace;
-    constructor(adapter, store, policy, secrets = [], sharedDiscordBindings = false) {
+    constructor(adapter, store, policy, secrets = [], sharedDiscordBindings = false, protectedPayloadStore, protectedIdentity, protectedOutputRequired = false) {
         this.adapter = adapter;
         this.store = store;
         this.policy = policy;
         this.secrets = secrets;
         this.sharedDiscordBindings = sharedDiscordBindings;
+        this.protectedPayloadStore = protectedPayloadStore;
+        this.protectedIdentity = protectedIdentity;
+        this.protectedOutputRequired = protectedOutputRequired;
         store.recoverDispatches();
+        const persistedFault = store.setting('protected-output-blocked');
+        if (persistedFault)
+            this.protectedOutputFault = /^[A-Z0-9_]{1,64}$/u.test(persistedFault) ? persistedFault : 'PROTECTED_OUTPUT_STATE_INVALID';
+        if (protectedOutputRequired && (!store.metadataOnly || !protectedPayloadStore || !protectedIdentity))
+            this.blockProtectedOutput('PROTECTED_OUTPUT_UNAVAILABLE');
+        if (protectedOutputRequired && store.protectedIntents().some(intent => intent.state === 'prepared' || intent.state === 'retiring'))
+            this.blockProtectedOutput('PROTECTED_OUTPUT_RECOVERY_PENDING');
+    }
+    get protectedOutputBlocked() { return this.protectedOutputFault; }
+    blockProtectedOutput(code) {
+        this.protectedOutputFault = /^[A-Z0-9_]{1,64}$/u.test(code) ? code : 'PROTECTED_OUTPUT_FAILURE';
+        try {
+            this.store.setSetting('protected-output-blocked', this.protectedOutputFault);
+        }
+        catch { /* In-memory fence remains for this process. */ }
+    }
+    maybeClearProtectedOutputFault() {
+        if (!this.protectedOutputFault)
+            return;
+        try {
+            if (this.store.protectedIntents().some(intent => intent.state === 'prepared' || intent.state === 'retiring'))
+                return;
+            if (this.store.allRuns().some(run => run.requiresProtectedOutput && terminal(run.state) && !run.protectedOutput))
+                return;
+            this.store.clearSetting('protected-output-blocked');
+            delete this.protectedOutputFault;
+        }
+        catch { /* Fail closed until a later complete observation. */ }
     }
     redactText(text) { return redact(text, this.secrets); }
     async sessions(actor) {
@@ -61,6 +109,33 @@ export class Engine {
             this.sessionMutations.delete(sessionId);
         }
     }
+    async withProtectedOutputLock(operation) {
+        const previous = this.protectedOutputLock;
+        let release;
+        this.protectedOutputLock = new Promise(resolve => { release = resolve; });
+        await previous;
+        try {
+            return await operation();
+        }
+        finally {
+            release();
+        }
+    }
+    async checkProtectedCapacity(additionalMetadataBytes = 0) {
+        if (!this.protectedOutputRequired)
+            return;
+        try {
+            await this.withProtectedOutputLock(async () => {
+                if (!this.protectedPayloadStore)
+                    throw new AppError('PROTECTED_OUTPUT_UNAVAILABLE', '保護出力を利用できません。');
+                this.store.verifyProtectedCapacity(await this.protectedPayloadStore.stats(), additionalMetadataBytes);
+            });
+        }
+        catch (error) {
+            this.blockProtectedOutput(errorCode(error));
+            throw error;
+        }
+    }
     key(actor) { return bindingKey(actor.guildId, actor.channelId, this.sharedDiscordBindings && actor.guildId !== 'telegram' ? 'shared' : actor.userId); }
     binding(actor) { return this.store.binding(this.key(actor)); }
     bindingVersion(actor) { return this.store.bindingVersion(this.key(actor)); }
@@ -96,6 +171,8 @@ export class Engine {
     }
     async submit(actor, id, text) {
         this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+        if (this.protectedOutputRequired && this.protectedOutputFault)
+            throw new AppError(this.protectedOutputFault, '保護出力の状態を確認できないため、新しい実行を停止しています。');
         if (!text.trim() || text.length > 6000)
             throw new AppError('PROMPT_INVALID', '指示は1〜6000文字で指定してください。');
         const existing = this.store.get(id);
@@ -114,16 +191,37 @@ export class Engine {
             const session = await this.session(sessionId, actor);
             if (session.running)
                 throw new AppError('SESSION_BUSY', 'DSHが実行中です。完了後に送信してください。');
-            const snapshot = await this.adapter.snapshot(sessionId);
-            const rawInbox = snapshot.values.inbox;
-            if (!rawInbox || typeof rawInbox !== 'object' || Array.isArray(rawInbox))
-                throw new AppError('SESSION_STATE_UNKNOWN', 'Native queue状態を確認できません。指示を送信せずPCで確認してください。');
-            const inbox = object(rawInbox);
-            if (!Array.isArray(inbox['next-turn']) || !Array.isArray(inbox['next-step']))
-                throw new AppError('SESSION_STATE_UNKNOWN', 'Native queue状態を確認できません。指示を送信せずPCで確認してください。');
-            if (inbox['next-turn'].length > 0 || inbox['next-step'].length > 0) {
-                throw new AppError('SESSION_BUSY', 'DSHに未処理の指示があります。PCで確認してください。');
-            }
+            let snapshot = await this.adapter.snapshot(sessionId);
+            if (!Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < 0)
+                throw new AppError('SESSION_STATE_UNKNOWN', 'Native Session cursorを確認できません。PCで確認してください。');
+            const runCursorFloor = snapshot.cursor;
+            const assertEmptyQueue = (values) => {
+                const rawInbox = values.inbox;
+                if (!rawInbox || typeof rawInbox !== 'object' || Array.isArray(rawInbox))
+                    throw new AppError('SESSION_STATE_UNKNOWN', 'Native queue状態を確認できません。指示を送信せずPCで確認してください。');
+                const inbox = object(rawInbox);
+                if (!Array.isArray(inbox['next-turn']) || !Array.isArray(inbox['next-step']))
+                    throw new AppError('SESSION_STATE_UNKNOWN', 'Native queue状態を確認できません。指示を送信せずPCで確認してください。');
+                if (inbox['next-turn'].length > 0 || inbox['next-step'].length > 0)
+                    throw new AppError('SESSION_BUSY', 'DSHに未処理の指示があります。PCで確認してください。');
+            };
+            assertEmptyQueue(snapshot.values);
+            this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+            if (this.binding(actor) !== sessionId || this.bindingVersion(actor) !== bindingVersion)
+                throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+            await this.checkProtectedCapacity(MAX_ACTIVE_RUN_METADATA_RESERVE);
+            // Quota/helper work is an await boundary: re-read the exact Native Session,
+            // workspace, running state and queue, then check the binding revision again
+            // synchronously immediately before durable admission and the only prompt.
+            const confirmedSession = await this.session(sessionId, actor);
+            if (confirmedSession.cwd !== session.cwd)
+                throw new AppError('SESSION_CHANGED', 'Native Session workspace identityが変わりました。');
+            if (confirmedSession.running)
+                throw new AppError('SESSION_BUSY', 'DSHが実行中です。完了後に送信してください。');
+            snapshot = await this.adapter.snapshot(sessionId);
+            if (!Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < runCursorFloor)
+                throw new AppError('SESSION_STATE_UNKNOWN', 'Native Session cursorが不連続です。PCで確認してください。');
+            assertEmptyQueue(snapshot.values);
             this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
             if (this.binding(actor) !== sessionId || this.bindingVersion(actor) !== bindingVersion)
                 throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
@@ -132,6 +230,7 @@ export class Engine {
                 state: 'dispatching', createdAt: now, updatedAt: now, lastSeq: snapshot.cursor, startSeq: snapshot.cursor, payloadDigest, turn: null,
                 output: '', result: '', admitted: false, contaminated: false, bindingVersion,
                 ...(this.store.metadataOnly && actor.guildId !== 'telegram' ? { notificationPreferences: this.notificationPreferences(actor) } : {}),
+                ...(this.protectedOutputRequired && actor.guildId !== 'telegram' ? { requiresProtectedOutput: true } : {}),
                 notification: 'none', notifyAttempts: 0, nextNotifyAt: 0, lastError: '' };
             this.store.create(run); // Durable intent BEFORE the only prompt call. Never replay uncertain dispatches.
             try {
@@ -142,7 +241,7 @@ export class Engine {
                 run.lastError = errorCode(error);
                 if (error instanceof DshRejected) {
                     run.state = 'failed';
-                    run.result = 'DSHが送信を拒否しました。設定とセッション状態を確認してください。';
+                    run.result = protectedRejection;
                     run.notification = 'pending';
                 }
                 else {
@@ -153,6 +252,29 @@ export class Engine {
             if (terminal(run.state)) {
                 run.bodyDigest = digest(run.result);
                 this.planDelivery(run);
+                if (run.requiresProtectedOutput) {
+                    try {
+                        await this.ensureProtectedOutput(run, 'bridge-rejection');
+                        this.maybeClearProtectedOutputFault();
+                        run.updatedAt = Date.now();
+                        return run; // Terminal row and manifest committed together.
+                    }
+                    catch (error) {
+                        const code = errorCode(error);
+                        this.blockProtectedOutput(code);
+                        const committed = this.store.get(run.id);
+                        if (committed?.protectedOutput?.state === 'published' && terminal(committed.state))
+                            return committed;
+                        run.state = 'unknown';
+                        run.notification = 'none';
+                        run.lastError = code;
+                        run.output = '';
+                        run.result = '';
+                        run.finalText = undefined;
+                        run.bodyMissing = true;
+                        run.updatedAt = Date.now();
+                    }
+                }
             }
             run.updatedAt = Date.now();
             this.store.save(run);
@@ -269,18 +391,218 @@ export class Engine {
             run.lastError = 'OUTPUT_UNAVAILABLE';
             return;
         }
-        run.bodyExpiresAt ??= Date.now() + 7 * 24 * 60 * 60 * 1000;
+        if (!run.requiresProtectedOutput)
+            run.bodyExpiresAt ??= Date.now() + PROTECTED_OUTPUT_RETENTION_MS;
         const preferences = run.notificationPreferences ?? { destination: 'dm', progress: false };
         run.bodyDigest = digest(run.result);
         run.delivery = { id: run.id, destination: preferences.destination, userId: run.userId, guildId: run.guildId, channelId: run.channelId,
             bodyDigest: run.originalFinalDigest ?? run.bodyDigest, digest: plan.digest, complete: plan.complete, codepoints: plan.codepoints,
             parts: plan.parts.map((part, index) => ({ index: index + 1, state: 'pending', attempts: 0, nextAttemptAt: 0, lastError: '', digest: digest(part.content) })) };
     }
+    async authorizeProtectedRun(run) {
+        if (!this.protectedOutputRequired || !this.protectedPayloadStore || !this.protectedIdentity || !run.requiresProtectedOutput)
+            throw new AppError('PROTECTED_OUTPUT_UNAVAILABLE', '保護出力を利用できません。');
+        this.policy.authorize(run.userId, run.guildId, run.channelId);
+        const key = this.key(run);
+        if (this.store.binding(key) !== run.sessionId || this.store.bindingVersion(key) !== run.bindingVersion)
+            throw new AppError('BINDING_CONFLICT', '固定されたSession選択が変更されました。');
+        await this.session(run.sessionId, run);
+        this.policy.authorize(run.userId, run.guildId, run.channelId);
+        if (this.store.binding(key) !== run.sessionId || this.store.bindingVersion(key) !== run.bindingVersion)
+            throw new AppError('BINDING_CONFLICT', '固定されたSession選択が変更されました。');
+    }
+    ensureProtectedOutput(run, completionSource) {
+        return this.withProtectedOutputLock(() => this.ensureProtectedOutputLocked(run, completionSource));
+    }
+    async ensureProtectedOutputLocked(run, completionSource) {
+        try {
+            const existingIntent = this.store.protectedIntent(run.id);
+            if (this.protectedOutputFault && existingIntent?.state !== 'prepared')
+                throw new AppError(this.protectedOutputFault, '保護出力の状態を確認できないため、公開を停止しています。');
+            await this.authorizeProtectedRun(run);
+            if (!terminal(run.state) || !run.delivery || !run.bodyDigest || !run.payloadDigest || run.startSeq === undefined
+                || !Number.isSafeInteger(run.lastSeq) || !Number.isSafeInteger(run.bindingVersion))
+                throw new AppError('PROTECTED_OUTPUT_INVALID', '保護出力に必要なRun情報を検証できません。');
+            if (run.protectedOutput?.state === 'published') {
+                if (run.protectedOutput.bodyDigest !== run.bodyDigest || run.protectedOutput.deliveryPlanDigest !== run.delivery.digest
+                    || run.protectedOutput.outputDigest !== (run.originalFinalDigest ?? run.bodyDigest))
+                    throw new AppError('PROTECTED_OUTPUT_CONFLICT', '既存の保護出力とRunが一致しません。');
+                return; // Atomic publish already cleared in-memory text; retry without a plaintext digest check.
+            }
+            if (run.bodyDigest !== digest(run.result))
+                throw new AppError('PROTECTED_OUTPUT_INVALID', '保護出力の本文digestが一致しません。');
+            const plan = splitFinalOutput(run.result, run.id);
+            if (plan.digest !== run.delivery.digest || plan.parts.length !== run.delivery.parts.length
+                || plan.parts.some((part, index) => run.delivery.parts[index].index !== index + 1 || digest(part.content) !== run.delivery.parts[index].digest))
+                throw new AppError('PROTECTED_OUTPUT_CONFLICT', '固定された配信計画が一致しません。');
+            const bodyChunks = protectedBodyChunks(run.result);
+            const specs = [
+                ...bodyChunks.map((text, index) => ({ kind: 'body', index, count: bodyChunks.length, text })),
+                ...plan.parts.map((part, index) => ({ kind: 'part', index, count: plan.parts.length, text: part.content }))
+            ];
+            if (specs.length > 200)
+                throw new AppError('PROTECTED_OUTPUT_TOO_LARGE', '保護出力の項目上限を超えました。');
+            const outputDigest = run.originalFinalDigest ?? run.bodyDigest;
+            const inputs = specs.map(spec => {
+                const context = {
+                    profile: 'local-bridge-output-v1', transport: 'discord', applicationId: this.protectedIdentity.applicationId, botId: this.protectedIdentity.botId,
+                    nativeSessionId: run.sessionId, bridgeRunId: run.id, clientRequestId: run.requestId, promptDigest: run.payloadDigest,
+                    observedTurn: run.turn, bridgeStartSeq: run.startSeq, lastObservedSeq: run.lastSeq, completionSource, terminalState: run.state,
+                    ownerId: run.userId, guildId: run.guildId, channelId: run.channelId, threadId: null,
+                    bindingMode: this.sharedDiscordBindings && run.guildId !== 'telegram' ? 'shared' : 'actor', bindingId: this.key(run), bindingVersion: run.bindingVersion,
+                    destination: run.delivery.destination, preRedactionDigest: run.originalFinalDigest ?? null, redactedBodyDigest: run.bodyDigest,
+                    deliveryPlanDigest: run.delivery.digest, itemKind: spec.kind, itemIndex: spec.index, itemCount: spec.count, itemDigest: digest(spec.text)
+                };
+                return { kind: 'bridge-output', context, text: spec.text };
+            });
+            const estimates = await this.protectedPayloadStore.estimate(inputs);
+            if (estimates.length !== specs.length)
+                throw new AppError('PROTECTED_PAYLOAD_FAILURE', '保護出力のサイズ見積りが一致しません。');
+            const existing = this.store.protectedIntent(run.id);
+            let intent;
+            if (existing) {
+                if (existing.state !== 'prepared' || existing.outputDigest !== outputDigest || existing.bodyDigest !== run.bodyDigest
+                    || existing.deliveryPlanDigest !== run.delivery.digest || existing.items.length !== specs.length)
+                    throw new AppError('PROTECTED_OUTPUT_CONFLICT', '既存の準備記録が現在のRunと一致しません。');
+                for (let i = 0; i < specs.length; i++) {
+                    const item = existing.items[i], estimate = estimates[i], input = inputs[i], spec = specs[i];
+                    if (item.kind !== spec.kind || item.index !== spec.index || item.count !== spec.count || item.contentDigest !== input.context.itemDigest
+                        || item.digest !== estimate.digest || item.byteLength !== estimate.byteLength || item.cipherBytes !== estimate.cipherBytes
+                        || JSON.stringify(item.context) !== JSON.stringify(input.context))
+                        throw new AppError('PROTECTED_OUTPUT_CONFLICT', '準備記録の内容またはscopeが一致しません。');
+                }
+                intent = existing;
+            }
+            else {
+                const intentId = randomBytes(32).toString('hex');
+                const createdAt = Date.now();
+                const items = specs.map((spec, index) => ({
+                    ref: randomBytes(32).toString('hex'), kind: spec.kind, index: spec.index, count: spec.count, digest: estimates[index].digest,
+                    contentDigest: inputs[index].context.itemDigest, byteLength: estimates[index].byteLength, cipherBytes: estimates[index].cipherBytes, context: inputs[index].context
+                }));
+                const manifest = { schemaVersion: 1, profile: 'local-bridge-output-v1', intentId, state: 'published', outputDigest,
+                    bodyDigest: run.bodyDigest, deliveryPlanDigest: run.delivery.digest, items, createdAt, deletedRefs: [] };
+                const metadata = { ...run, output: '', result: '', finalText: undefined, bodyMissing: true, protectedOutput: manifest };
+                intent = { schemaVersion: 1, profile: 'local-bridge-output-v1', intentId, runId: run.id, state: 'prepared', outputDigest,
+                    bodyDigest: run.bodyDigest, deliveryPlanDigest: run.delivery.digest, items, createdAt,
+                    reservedMetadataBytes: Buffer.byteLength(JSON.stringify(metadata), 'utf8') + 65536, deletedRefs: [] };
+                const inventory = await this.protectedPayloadStore.stats();
+                intent = this.store.reserveProtectedIntent(intent, inventory);
+            }
+            const inventoryBeforeWrite = await this.protectedPayloadStore.stats();
+            this.store.verifyProtectedCapacity(inventoryBeforeWrite);
+            await this.protectedPayloadStore.createManyWithRefs(intent.items.map((item, index) => ({ ref: item.ref, input: inputs[index], reserveBytes: item.cipherBytes })));
+            const inventory = await this.protectedPayloadStore.stats();
+            this.store.verifyProtectedCapacity(inventory);
+            const actual = new Map(inventory.files.map(file => [file.ref, file.bytes]));
+            if (intent.items.some(item => actual.get(item.ref) !== item.cipherBytes))
+                throw new AppError('PROTECTED_PAYLOAD_MISMATCH', '保護出力ファイルの予約サイズと実体が一致しません。');
+            const restored = await this.protectedPayloadStore.readMany(intent.items.map(item => ({ ref: item.ref, expected: { kind: 'bridge-output', digest: item.digest, context: item.context } })));
+            if (restored.length !== specs.length || restored.some((payload, index) => payload.text !== specs[index].text || digest(payload.text) !== intent.items[index].contentDigest))
+                throw new AppError('PROTECTED_PAYLOAD_MISMATCH', '保護出力のreadback検証に失敗しました。');
+            await this.authorizeProtectedRun(run); // Recheck exact Native Session, actor, pinned channel and Binding after every awaited write/read.
+            run.output = '';
+            run.result = '';
+            run.finalText = undefined;
+            run.bodyMissing = true;
+            run.updatedAt = Date.now();
+            this.store.commitProtectedOutput(run, intent.intentId);
+            this.store.verifyProtectedCapacity(await this.protectedPayloadStore.stats());
+        }
+        catch (error) {
+            this.blockProtectedOutput(errorCode(error));
+            throw error;
+        }
+    }
+    validateProtectedManifestScope(run, manifest) {
+        const identity = this.protectedIdentity, delivery = run.delivery;
+        const expectedMode = this.sharedDiscordBindings && run.guildId !== 'telegram' ? 'shared' : 'actor';
+        if (!identity || !delivery || !run.payloadDigest || run.startSeq === undefined || run.bindingVersion === undefined || !run.bodyDigest
+            || manifest.profile !== 'local-bridge-output-v1' || manifest.bodyDigest !== run.bodyDigest || manifest.deliveryPlanDigest !== delivery.digest
+            || manifest.outputDigest !== (run.originalFinalDigest ?? run.bodyDigest) || manifest.items.length < 1)
+            throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力manifestがRunと一致しません。');
+        for (const item of manifest.items) {
+            const context = item.context;
+            if (context.applicationId !== identity.applicationId || context.botId !== identity.botId
+                || context.nativeSessionId !== run.sessionId || context.bridgeRunId !== run.id || context.clientRequestId !== run.requestId
+                || context.promptDigest !== run.payloadDigest || context.observedTurn !== run.turn || context.bridgeStartSeq !== run.startSeq
+                || context.lastObservedSeq !== run.lastSeq || context.terminalState !== run.state || context.ownerId !== run.userId
+                || context.guildId !== run.guildId || context.channelId !== run.channelId || context.threadId !== null
+                || context.bindingMode !== expectedMode || context.bindingId !== this.key(run) || context.bindingVersion !== run.bindingVersion
+                || context.destination !== delivery.destination || context.preRedactionDigest !== (run.originalFinalDigest ?? null)
+                || context.redactedBodyDigest !== run.bodyDigest || context.deliveryPlanDigest !== delivery.digest
+                || context.itemKind !== item.kind || context.itemIndex !== item.index || context.itemCount !== item.count
+                || context.itemDigest !== item.contentDigest || !/^[a-f0-9]{64}$/u.test(item.digest))
+                throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力のNative Session・deployment・owner・binding scopeが一致しません。');
+            if (context.completionSource === 'native-turn' ? !run.admitted || run.turn === null : context.completionSource === 'bridge-rejection' ? run.admitted || run.state !== 'failed' || run.turn !== null : true) {
+                throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力の完了根拠が一致しません。');
+            }
+        }
+    }
+    assertProtectedReadCurrent(run, manifest) {
+        const current = this.store.get(run.id);
+        if (run.bodyExpiresAt !== undefined && Date.now() >= run.bodyExpiresAt || current?.bodyExpiresAt !== undefined && Date.now() >= current.bodyExpiresAt)
+            throw new AppError('BODY_EXPIRED', '本文の保持期限（7日）を過ぎました。');
+        if (!current?.protectedOutput || current.protectedOutput.state !== 'published' || current.protectedOutput.intentId !== manifest.intentId
+            || current.protectedOutput.bodyDigest !== manifest.bodyDigest || current.protectedOutput.deliveryPlanDigest !== manifest.deliveryPlanDigest
+            || current.protectedOutput.outputDigest !== manifest.outputDigest || JSON.stringify(current.protectedOutput.items) !== JSON.stringify(manifest.items)
+            || current.sessionId !== run.sessionId || current.requestId !== run.requestId || current.bodyDigest !== run.bodyDigest
+            || current.bindingVersion !== run.bindingVersion || current.delivery?.digest !== run.delivery?.digest || !terminal(current.state) || current.state !== run.state) {
+            throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力の永続Run・expiry・intent状態が変わりました。');
+        }
+        this.validateProtectedManifestScope(current, current.protectedOutput);
+        return current;
+    }
+    async restoreProtectedBody(run) {
+        return this.withProtectedOutputLock(async () => {
+            const manifest = run.protectedOutput;
+            if (!manifest || manifest.state !== 'published' || !this.protectedPayloadStore || !run.delivery)
+                throw new AppError('PROTECTED_OUTPUT_UNAVAILABLE', '保護出力を復元できません。');
+            this.validateProtectedManifestScope(run, manifest);
+            this.assertProtectedReadCurrent(run, manifest);
+            const bodyItems = manifest.items.filter(item => item.kind === 'body').sort((a, b) => a.index - b.index);
+            const partItems = manifest.items.filter(item => item.kind === 'part').sort((a, b) => a.index - b.index);
+            if (!bodyItems.length || bodyItems.some((item, index) => item.index !== index || item.count !== bodyItems.length)
+                || partItems.length !== run.delivery.parts.length || partItems.some((item, index) => item.index !== index || item.count !== partItems.length))
+                throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力manifestの分割を検証できません。');
+            const items = [...bodyItems, ...partItems];
+            await this.authorizeProtectedRun(run);
+            const values = await this.protectedPayloadStore.readMany(items.map(item => ({ ref: item.ref, expected: { kind: 'bridge-output', digest: item.digest, context: item.context } })));
+            if (values.length !== items.length || values.some((value, index) => digest(value.text) !== items[index].contentDigest))
+                throw new AppError('PROTECTED_PAYLOAD_MISMATCH', '保護出力digestを確認できません。');
+            const body = values.slice(0, bodyItems.length).map(value => value.text).join('');
+            const parts = values.slice(bodyItems.length).map(value => value.text);
+            const plan = splitFinalOutput(body, run.id);
+            if (digest(body) !== manifest.bodyDigest || plan.digest !== manifest.deliveryPlanDigest || plan.parts.length !== parts.length
+                || plan.parts.some((part, index) => part.content !== parts[index] || digest(parts[index]) !== run.delivery.parts[index].digest))
+                throw new AppError('PROTECTED_PAYLOAD_MISMATCH', '保護出力本文・配信計画のreadbackが一致しません。');
+            await this.authorizeProtectedRun(run);
+            const current = this.assertProtectedReadCurrent(run, manifest);
+            if (current.bodyResolvedAt === undefined)
+                delete run.bodyResolvedAt;
+            else
+                run.bodyResolvedAt = current.bodyResolvedAt;
+            if (current.bodyExpiresAt === undefined)
+                delete run.bodyExpiresAt;
+            else
+                run.bodyExpiresAt = current.bodyExpiresAt;
+            run.result = body;
+            run.output = body;
+            delete run.bodyMissing;
+            delete run.finalText;
+        });
+    }
     async restoreBody(run) {
         if (this.store.metadataOnly && run.bodyExpiresAt !== undefined && Date.now() >= run.bodyExpiresAt)
             throw new AppError('BODY_EXPIRED', '本文の保持期限（7日）を過ぎました。PCの同一Sessionで確認してください。');
         if (!run.bodyMissing)
             return;
+        if (run.requiresProtectedOutput && run.protectedOutput) {
+            await this.restoreProtectedBody(run);
+            return;
+        }
+        if (run.requiresProtectedOutput && terminal(run.state))
+            throw new AppError('PROTECTED_OUTPUT_UNAVAILABLE', '保護出力の確定または復元を確認できません。');
         if (run.state === 'failed' && !run.admitted) {
             const text = 'DSHが送信を拒否しました。設定とセッション状態を確認してください。';
             if (run.bodyDigest !== digest(text))
@@ -319,6 +641,11 @@ export class Engine {
         }
         delete run.bodyMissing;
         this.planDelivery(run);
+        if (terminal(run.state) && run.requiresProtectedOutput) {
+            await this.ensureProtectedOutput(run, 'native-turn');
+            this.maybeClearProtectedOutputFault();
+            return;
+        }
         this.store.save(run);
     }
     consume(run, events) {
@@ -494,6 +821,12 @@ export class Engine {
             // sending becomes unknown, and even this process must not send the tail.
             this.store.save(run);
         }
+        if (this.protectedOutputRequired && delivery.complete && run.notification === 'sent' && delivery.parts.length > 0
+            && delivery.parts.every(part => part.state === 'sent' && !!part.messageId) && run.protectedOutput?.state === 'published' && run.bodyResolvedAt === undefined) {
+            const resolvedAt = Date.now();
+            this.store.resolveProtectedOutput(run, resolvedAt, resolvedAt + PROTECTED_OUTPUT_RETENTION_MS);
+            this.maybeClearProtectedOutputFault();
+        }
     }
     async deliverWorkingNotice(run, notify) {
         if (run.workNotice !== 'ready')
@@ -549,11 +882,76 @@ export class Engine {
         run.updatedAt = Date.now();
         this.store.save(run);
     }
+    async retireProtectedRun(run, now) {
+        if (!this.protectedPayloadStore || run.protectedOutput?.state !== 'retiring')
+            throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力の削除状態を確認できません。');
+        const already = new Set(run.protectedOutput.deletedRefs), pending = run.protectedOutput.items.filter(item => !already.has(item.ref));
+        if (!pending.length) {
+            this.store.recordProtectedDeletes(run.id, [], now);
+            return;
+        }
+        const results = await this.protectedPayloadStore.deleteMany(pending.map(item => item.ref));
+        if (results.length !== pending.length)
+            throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力削除の応答数が一致しません。');
+        const byRef = new Map(pending.map(item => [item.ref, item]));
+        const seen = new Set();
+        for (const result of results) {
+            const item = byRef.get(result.ref);
+            if (!item || seen.has(result.ref) || !Number.isSafeInteger(result.bytes) || result.bytes < 0
+                || result.deleted && result.bytes !== item.cipherBytes || !result.deleted && result.bytes !== 0)
+                throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力の削除応答を検証できません。');
+            seen.add(result.ref);
+        }
+        if (seen.size !== pending.length)
+            throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力削除に不明な参照があります。');
+        this.store.recordProtectedDeletes(run.id, pending.map(item => item.ref), now);
+    }
+    async reconcileProtectedOutputs() {
+        if (!this.protectedOutputRequired || !this.protectedPayloadStore)
+            return;
+        await this.withProtectedOutputLock(async () => {
+            this.store.verifyProtectedCapacity(await this.protectedPayloadStore.stats());
+            const now = Date.now();
+            for (const candidate of this.store.allRuns()) {
+                const output = candidate.protectedOutput;
+                if (!output)
+                    continue;
+                if (output.state === 'published' && output.resolvedAt === undefined && candidate.delivery?.complete && candidate.notification === 'sent'
+                    && candidate.delivery.parts.length > 0 && candidate.delivery.parts.every(part => part.state === 'sent' && !!part.messageId)) {
+                    // Durable per-part message receipts are the resolution fence. No Native
+                    // history/session lookup is needed to retain an already-delivered body.
+                    this.store.resolveProtectedOutput(candidate, now, now + PROTECTED_OUTPUT_RETENTION_MS);
+                }
+                const current = this.store.get(candidate.id);
+                if (!current?.protectedOutput)
+                    throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力Runを復元できません。');
+                if (current.protectedOutput.state === 'published' && current.protectedOutput.expiresAt !== undefined && current.protectedOutput.expiresAt <= now) {
+                    const retiring = this.store.beginProtectedRetirement(current.id, now);
+                    if (retiring)
+                        await this.retireProtectedRun(retiring, now);
+                }
+                else if (current.protectedOutput.state === 'retiring')
+                    await this.retireProtectedRun(current, now);
+            }
+            this.store.verifyProtectedCapacity(await this.protectedPayloadStore.stats());
+        });
+        this.maybeClearProtectedOutputFault();
+    }
     async tick(notify, notifyWorking) {
         if (this.ticking)
             return;
         this.ticking = true;
         try {
+            if (this.protectedOutputRequired) {
+                try {
+                    await this.checkProtectedCapacity();
+                    await this.reconcileProtectedOutputs();
+                    this.maybeClearProtectedOutputFault();
+                }
+                catch (error) {
+                    this.blockProtectedOutput(errorCode(error)); /* Persisted fault keeps admission/publication fenced. */
+                }
+            }
             const verifiedWorkingRuns = new Set();
             for (const stored of this.store.active()) {
                 if (stored.state === 'dispatching')
@@ -566,11 +964,23 @@ export class Engine {
                     const events = await this.adapter.events(run.sessionId, snapshot.cursor, run.lastSeq);
                     this.consume(run, events);
                     run.updatedAt = Date.now();
-                    this.store.save(run);
+                    if (terminal(run.state) && run.requiresProtectedOutput) {
+                        await this.ensureProtectedOutput(run, 'native-turn');
+                        this.maybeClearProtectedOutputFault();
+                    }
+                    else
+                        this.store.save(run);
                     if (run.workNotice === 'ready' && run.workStartedSeq !== undefined && run.startStep !== undefined && run.startStep.seq < run.workStartedSeq)
                         verifiedWorkingRuns.add(run.id);
                 }
                 catch (error) {
+                    // A post-commit capacity failure must never overwrite the terminal row
+                    // with this loop's stale pre-commit active snapshot.
+                    const latest = this.store.get(run.id);
+                    if (run.requiresProtectedOutput && latest?.protectedOutput?.state === 'published' && terminal(latest.state)) {
+                        this.blockProtectedOutput(errorCode(error));
+                        continue;
+                    }
                     // No partial cursor or output commit on a failed read. Do NOT infer success from idle.
                     stored.lastError = errorCode(error);
                     stored.updatedAt = Date.now();
@@ -592,6 +1002,8 @@ export class Engine {
                     await this.deliverWorkingNotice(run, notifyWorking);
             }
             for (const run of this.store.pendingNotifications()) {
+                if (this.protectedOutputRequired && this.protectedOutputFault && run.requiresProtectedOutput)
+                    continue;
                 if (this.store.metadataOnly && run.guildId !== 'telegram') {
                     if (!run.delivery) {
                         // No digest on a legacy terminal row means no trustworthy baseline.

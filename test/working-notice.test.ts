@@ -13,7 +13,7 @@ import type { AgentAdapter, SessionInfo, Snapshot, WireEvent } from '../src/type
 
 const actor: Actor = { userId: '111111111111111111', guildId: '222222222222222222', channelId: '333333333333333333' };
 const wire = (seq: number, type: string, data: Record<string, unknown>, surfaceOp?: unknown): WireEvent => ({ seq, type, data, time: seq + 1, surfaceOp });
-function runStart(requestId: string, start = 0, turn = 7): WireEvent[] {
+function runStart(requestId: string, start = 1, turn = 7): WireEvent[] {
   return [wire(start, 'turn/start', { turn }), wire(start + 1, 'step/start', { turn, step: 1 }),
     wire(start + 2, 'user/message', { role: 'user', source: { kind: 'user', rpcId: requestId }, content: [] }, 'append')];
 }
@@ -23,7 +23,7 @@ class Adapter implements AgentAdapter {
   async list(): Promise<SessionInfo[]> { return this.rows; }
   async create(): Promise<string> { return 'unused'; }
   async prompt(): Promise<void> { this.promptCalls++; }
-  async snapshot(): Promise<Snapshot> { if (this.readError) throw this.readError; return { cursor: this.log.at(-1)?.seq ?? -1, values: { inbox: { 'next-turn': [], 'next-step': [] } } }; }
+  async snapshot(): Promise<Snapshot> { if (this.readError) throw this.readError; return { cursor: this.log.at(-1)?.seq ?? 0, values: { inbox: { 'next-turn': [], 'next-step': [] } } }; }
   async events(_sessionId: string, throughSeq: number, afterSeq: number): Promise<WireEvent[]> {
     if (this.readError) throw this.readError;
     return this.log.filter(event => event.seq > afterSeq && event.seq <= throughSeq);
@@ -45,13 +45,13 @@ async function setup(t: { after(fn: () => unknown): void }, databasePath = ':mem
 
 for (const [name, events] of [
   ['acceptance without Native events', []],
-  ['turn/start without a step or matching user append', [wire(0, 'turn/start', { turn: 7 })]],
-  ['matching user append without step/start', [wire(0, 'turn/start', { turn: 7 }), wire(1, 'user/message', { source: { kind: 'user', rpcId: 'discord:working-run' } }, 'append')]],
-  ['preparation failure before matching user append', [wire(0, 'turn/start', { turn: 7 }), wire(1, 'step/start', { turn: 7, step: 1 }),
-    wire(2, 'step/end', { turn: 7, step: 1, reason: { kind: 'error' } }), wire(3, 'turn/end', { turn: 7, reason: { kind: 'error' } })]],
-  ['stale step from an earlier turn', [...runStart('discord:foreign', 0, 7).slice(0, 2), wire(2, 'turn/end', { turn: 7, reason: { kind: 'error' } }),
-    wire(3, 'turn/start', { turn: 8 }), wire(4, 'user/message', { source: { kind: 'user', rpcId: 'discord:working-run' } }, 'append')]],
-  ['foreign rpcId', [...runStart('discord:foreign'), wire(3, 'turn/end', { turn: 7, reason: { kind: 'completed' } })]]
+  ['turn/start without a step or matching user append', [wire(1, 'turn/start', { turn: 7 })]],
+  ['matching user append without step/start', [wire(1, 'turn/start', { turn: 7 }), wire(2, 'user/message', { source: { kind: 'user', rpcId: 'discord:working-run' } }, 'append')]],
+  ['preparation failure before matching user append', [wire(1, 'turn/start', { turn: 7 }), wire(2, 'step/start', { turn: 7, step: 1 }),
+    wire(3, 'step/end', { turn: 7, step: 1, reason: { kind: 'error' } }), wire(4, 'turn/end', { turn: 7, reason: { kind: 'error' } })]],
+  ['stale step from an earlier turn', [...runStart('discord:foreign', 1, 7).slice(0, 2), wire(3, 'turn/end', { turn: 7, reason: { kind: 'error' } }),
+    wire(4, 'turn/start', { turn: 8 }), wire(5, 'user/message', { source: { kind: 'user', rpcId: 'discord:working-run' } }, 'append')]],
+  ['foreign rpcId', [...runStart('discord:foreign'), wire(4, 'turn/end', { turn: 7, reason: { kind: 'completed' } })]]
 ] as const) {
   test(`does not send work-start notice on ${name}`, async t => {
     const { engine, adapter, store } = await setup(t); adapter.log.push(...events);
@@ -63,7 +63,7 @@ for (const [name, events] of [
 test('sends only after exact user append inside matching active step, with durable no-replay receipt', async t => {
   const { engine, adapter, store } = await setup(t); adapter.log.push(...runStart('discord:working-run'));
   let sends = 0; await engine.tick(async () => {}, async run => {
-    sends++; assert.equal(run.workStartedSeq, 2); assert.equal(run.startStep?.turn, 7); assert.equal(run.startStep?.step, 1);
+    sends++; assert.equal(run.workStartedSeq, 3); assert.equal(run.startStep?.turn, 7); assert.equal(run.startStep?.step, 1);
     assert.equal(store.get('working-run')?.workNotice, 'unknown'); return { messageId: '55555555555555555' };
   });
   assert.equal(sends, 1); assert.equal(store.get('working-run')?.workNotice, 'sent');
@@ -73,11 +73,11 @@ test('sends only after exact user append inside matching active step, with durab
 
 test('matching step checkpoint survives a poll boundary and user event adds no invented turn or step fields', async t => {
   const { engine, adapter, store } = await setup(t);
-  adapter.log.push(wire(0, 'turn/start', { turn: 7 }), wire(1, 'step/start', { turn: 7, step: 1 }));
+  adapter.log.push(wire(1, 'turn/start', { turn: 7 }), wire(2, 'step/start', { turn: 7, step: 1 }));
   let sends = 0; await engine.tick(async () => {}, async () => { sends++; return { messageId: '55555555555555555' }; });
-  assert.equal(sends, 0); assert.equal(store.get('working-run')?.lastSeq, 1);
-  adapter.log.push(wire(2, 'user/message', { role: 'user', source: { kind: 'user', rpcId: 'discord:working-run' }, content: [] }, 'append'));
-  await engine.tick(async () => {}, async run => { sends++; assert.equal(run.workStartedSeq, 2); return { messageId: '55555555555555555' }; });
+  assert.equal(sends, 0); assert.equal(store.get('working-run')?.lastSeq, 2);
+  adapter.log.push(wire(3, 'user/message', { role: 'user', source: { kind: 'user', rpcId: 'discord:working-run' }, content: [] }, 'append'));
+  await engine.tick(async () => {}, async run => { sends++; assert.equal(run.workStartedSeq, 3); return { messageId: '55555555555555555' }; });
   assert.equal(sends, 1); assert.equal(store.get('working-run')?.workNotice, 'sent');
 });
 
@@ -91,8 +91,8 @@ test('ambiguous send persists unknown and never auto-replays', async t => {
 
 test('clean same-poll terminal suppresses stale start notice while delivering terminal result', async t => {
   const { engine, adapter, store } = await setup(t); adapter.log.push(...runStart('discord:working-run'),
-    wire(3, 'assistant/message', { turn: 7, message: { role: 'assistant', content: [{ type: 'text', text: 'complete' }] } }, 'append'),
-    wire(4, 'turn/end', { turn: 7, reason: { kind: 'completed' } }));
+    wire(4, 'assistant/message', { turn: 7, message: { role: 'assistant', content: [{ type: 'text', text: 'complete' }] } }, 'append'),
+    wire(5, 'turn/end', { turn: 7, reason: { kind: 'completed' } }));
   let starts = 0, finals = 0; await engine.tick(async () => { finals++; return { messageId: '55555555555555556' }; }, async () => { starts++; return { messageId: '55555555555555555' }; });
   assert.equal(starts, 0); assert.equal(finals, 1); assert.equal(store.get('working-run')?.workNotice, 'suppressed');
   assert.equal(store.get('working-run')?.state, 'succeeded');
@@ -111,9 +111,9 @@ test('complete Native read is required before resuming a persisted ready notice'
 
 test('whole-batch contamination suppresses start; same-poll terminal suppresses stale start but still sends final', async t => {
   const { engine, adapter, store } = await setup(t); adapter.log.push(...runStart('discord:working-run'),
-    wire(3, 'user/message', { source: { kind: 'user', rpcId: 'desktop-other' } }, 'append'),
-    wire(4, 'assistant/message', { turn: 7, message: { role: 'assistant', content: [{ type: 'text', text: 'must-not-leak' }] } }, 'append'),
-    wire(5, 'turn/end', { turn: 7, reason: { kind: 'completed' } }));
+    wire(4, 'user/message', { source: { kind: 'user', rpcId: 'desktop-other' } }, 'append'),
+    wire(5, 'assistant/message', { turn: 7, message: { role: 'assistant', content: [{ type: 'text', text: 'must-not-leak' }] } }, 'append'),
+    wire(6, 'turn/end', { turn: 7, reason: { kind: 'completed' } }));
   let starts = 0, finals = 0; await engine.tick(async () => { finals++; return { messageId: '55555555555555556' }; }, async () => { starts++; return { messageId: '55555555555555555' }; });
   assert.equal(starts, 0); assert.equal(finals, 1); assert.equal(store.get('working-run')?.workNotice, 'suppressed');
   assert.equal(store.get('working-run')?.state, 'interrupted'); assert.equal(store.get('working-run')?.output, '');
@@ -122,8 +122,8 @@ test('whole-batch contamination suppresses start; same-poll terminal suppresses 
 test('same-turn foreign input after previously sent notice never resets its marker or replays', async t => {
   const { engine, adapter, store } = await setup(t); adapter.log.push(...runStart('discord:working-run'));
   let starts = 0; await engine.tick(async () => {}, async () => { starts++; return { messageId: '55555555555555555' }; });
-  adapter.log.push(wire(3, 'user/message', { source: { kind: 'user', rpcId: 'desktop-other' } }, 'append'),
-    wire(4, 'turn/end', { turn: 7, reason: { kind: 'completed' } }));
+  adapter.log.push(wire(4, 'user/message', { source: { kind: 'user', rpcId: 'desktop-other' } }, 'append'),
+    wire(5, 'turn/end', { turn: 7, reason: { kind: 'completed' } }));
   await engine.tick(async () => {}, async () => { starts++; return { messageId: '55555555555555556' }; });
   assert.equal(starts, 1); assert.equal(store.get('working-run')?.workNotice, 'sent');
   assert.equal(store.get('working-run')?.state, 'interrupted');

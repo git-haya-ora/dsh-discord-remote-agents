@@ -23,12 +23,16 @@ async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => 
       async read(ref: string) { const value = secrets.get(ref); if (!value) throw new Error('Secret missing'); return value; },
       async retire(ref: string) { if (failRetire) throw new Error(syntheticToken); secrets.delete(ref); }
     },
+    protectedPayloadStore: {
+      async estimate() { return []; }, async createWithRef() {}, async createManyWithRefs() {}, async read() { return { text: '' }; },
+      async readMany() { return []; }, async stats() { return { bytes: 0, files: [] }; }, async delete() {}, async deleteMany(refs: string[]) { return refs.map(ref => ({ ref, deleted: false, bytes: 0 })); }
+    },
     fetcher: async (url: string) => new Response(JSON.stringify(url.endsWith('/users/@me') ? { id: applicationId, username: 'fixture', bot: true } : { id: applicationId, bot: { id: applicationId } }), { status: 200 }),
     createBot: (_config: unknown, engine: Engine) => { currentEngine = engine; receiverCreates++; let ready = false; return { client: { isReady: () => ready }, async start() { ready = true; }, async notifyConnected() { noticeCalls++; assert.equal(host.status().state, 'connected'); return noticeGate ?? { sent: noticeFailure ? 0 : 1, failed: noticeFailure ? 1 : 0 }; }, async stop() { ready = false; receiverStops++; } }; }
   });
   const settings = { guildId, applicationId, allowedUserIds: ['111111111111111111'], allowedChannelIds: ['333333333333333333'], workspaces: { fixture: root }, autoStart: false };
   t.after(async () => { await host.dispose(); await rm(root, { recursive: true, force: true }); });
-  return { host, store, secrets, settings, noticeCalls: () => noticeCalls, engine: () => { assert.ok(currentEngine); return currentEngine; }, counts: () => ({ creates, receiverCreates, receiverStops }), failRetirement: () => { failRetire = true; } };
+  return { host, ctx, store, secrets, settings, noticeCalls: () => noticeCalls, engine: () => { assert.ok(currentEngine); return currentEngine; }, counts: () => ({ creates, receiverCreates, receiverStops }), failRetirement: () => { failRetire = true; } };
 }
 test('slow notice delivery does not block connected management status', { timeout: 5000 }, async t => {
   let release!: (value: { sent: number; failed: number }) => void;
@@ -146,6 +150,22 @@ test('boot takes mutation ownership before delayed initialize; concurrent start/
   assert.deepEqual(await host.dispatch({ operation: 'save', expectedRevision: 0, settings, token: syntheticToken }), { ok: false, code: 'MANAGEMENT_BUSY' });
   const status = await host.dispatch({ operation: 'status' }); assert.equal(status.ok, true);
   release(); await boot; assert.equal(counts().receiverCreates, 0);
+});
+test('dispose during asynchronous Native capability list prevents stale Bot construction/start', { timeout: 5000 }, async t => {
+  const f = await setup(t);
+  assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings: f.settings, token: syntheticToken })).ok, true);
+  let entered!: () => void, release!: () => void;
+  const listed = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  f.ctx.sessionController.list = async () => { entered(); await gate; return { items: [] }; };
+  const start = f.host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true });
+  await listed;
+  await f.host.dispose();
+  assert.deepEqual(await start, { ok: false, code: 'RECEIVER_NOT_READY' });
+  assert.equal(f.host.status().state, 'disposed'); assert.equal(f.host.status().capabilities.text, false);
+  assert.deepEqual(f.counts(), { creates: 1, receiverCreates: 0, receiverStops: 0 });
+  release(); await gate; await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(f.counts(), { creates: 1, receiverCreates: 0, receiverStops: 0 });
 });
 test('official Bot/current Application schema allows missing optional bot, rejects identity mismatch and human user', async () => {
   const fetcher = (user: Record<string, unknown>, app: Record<string, unknown>) => (async (url: string | URL | Request) => new Response(JSON.stringify(String(url).endsWith('/users/@me') ? user : app), { status: 200 })) as typeof fetch;
