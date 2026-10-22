@@ -75,6 +75,8 @@ tokenは送信時に入力欄から消えます。保存済みtokenを表示す�
 | やりたいこと | コマンド例 |
 |---|---|
 | 現在のSession・作業先・通知先を見る | `/agent current` |
+| 利用可能なmodel候補を検索する（read-only） | `/agent models query:名前 page:1` |
+| 待機Sessionのtitleを変更する（Native CASなし） | `/agent settings title value:名前 confirm-no-cas:true` |
 | 接続後に作業フォルダーを許可する | `/agent workspace-add alias:main path:C:\Work\repo confirm-access:true` |
 | 許可済みの作業フォルダーの別名を見る | `/agent workspaces` |
 | 既存のSessionを見る | `/agent sessions` |
@@ -104,7 +106,7 @@ tokenは送信時に入力欄から消えます。保存済みtokenを表示す�
 
 ## 最終回答のDM配信と通知設定
 
-このプラグインから受け付けたRunが完了すると、**既定では指示を送った本人へ最終回答をDMで自動配信**します。長い回答はRun ID・part番号付きの複数メッセージに分割します。途中経過の自動通知は未対応です。
+このプラグインから受け付けたRunが完了すると、**既定では指示を送った本人へ最終回答をDMで自動配信**します。長い回答はRun ID・part番号付きの複数メッセージに分割します。Nativeから同じturn/step内で当該Run固有の `rpcId` を持つ user/message append を観測した後、Runに固定したDMまたは元チャンネルへ「作業中」を1回だけ送ります。受付・キュー時点では送信せず、開始証拠不足・混入・同じpoll中の完了時は抑制します。送信結果不明は自動再送しません。途中経過の自動通知は未対応です。
 
 - 1メッセージは見出しを含め2,000 UTF-16単位以内です。改行・コードの本文を保持し、mentions・埋め込み表示を抑制します。
 - 自動配信は**100,000 Unicode code points（Unicode文字）かつ128メッセージまで**です。上限を超える場合は「全文配信未完了」と案内します。上限を超えた結果も `/agent result run:RUN_ID page:番号` で順に参照できますが、本文を復元できない場合は取得不能と表示します。
@@ -124,14 +126,13 @@ tokenは送信時に入力欄から消えます。保存済みtokenを表示す�
 
 ## 未対応の機能と制限
 
-以下は現在の正式なNative契約や実機検証が不足しており、使用可能なコマンドとして提供していません。理由は `/agent help topic:機能名` でも確認できます。
+下記の未対応項目は、`/agent help topic:機能名` でも理由を確認できます。カタログ表示・タイトル変更・Run開始通知など実装済みの部分と、正式契約や実機検証が残る機能を分けています。
 
-- モデル一覧・モデル／推論レベルの変更、コンテキスト使用量の取得、Sessionのタイトル変更・設定リセット。`/agent current` でもモデル／推論は不明と表示します。
-- `/agent history` によるSession全体の会話履歴参照。`/agent result` は、このプラグインが追跡するRunの結果参照です。
-- DMからの操作、通常メッセージの自動実行、Run開始時に「作業中」と送信する通知、途中経過の自動通知。
-- Run指定停止、承認回答、キュー操作、ファイル・Artifactの送信、会話圧縮。
+- モデル選択・推論レベル変更、設定リセット、実際のcontext使用量・上限、Session全体の会話履歴。`/agent current` はNativeが返す直近リクエストmodelと次回設定を区別して表示しますが、現在実行中のmodelやcontext消費とは断定しません。
+- DMからの操作、通常メッセージの自動実行、途中経過の自動通知。
+- Run指定停止、リモート承認回答、共有Desktopとの原子的FIFO queue、任意ファイル・Artifact送信、会話圧縮。Native側の関連APIの一部は確認されていますが、Runスコープ・耐久性・認可・unknown/no-replayを満たすDiscord機能はまだ提供しません。
 
-`/agent new` が受け付けるのは作業フォルダーの別名だけです。タイトル・モデル・推論レベルの指定はできません。Telegramの追加開発も対象外です。
+`/agent models` はNative model catalogのread-only検索です。`/agent settings title value:<title> confirm-no-cas:true` は選択中の待機Sessionのタイトルを変更しreadbackを確認しますが、Native title CASがなくDesktopとの同時変更を保護できません。model/reasoning選択APIはHost既定も変更するため使いません。`/agent new` は作業フォルダー別名だけを受け付け、title/model/effort指定はできません。Native create自体は実行されてから新Sessionのmodern-page契約をprobeするため、probe失敗時は作成済みSessionが未bindで残る可能性があります。Telegramの追加開発も対象外です。
 
 結果本文の再取得は同じNative履歴の可用性に依存します。Bridge側の本文参照期限は完了から7日ですが、Native履歴の削除や全文の保護保存・保持を保証するものではありません。履歴が失われた場合、別の回答で代用せず取得不能と表示します。
 

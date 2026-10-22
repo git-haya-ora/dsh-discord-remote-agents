@@ -32,7 +32,9 @@ export class DiscordBot {
     pendingTick;
     stopping = false;
     connectionNoticeAbort = new AbortController();
+    workingNoticeAbort = new AbortController();
     connectionNoticeTask;
+    stopTask;
     connectionNoticeId = randomUUID();
     handling = new Set();
     constructor(config, engine, notificationRouter, textOnly = false) {
@@ -147,8 +149,34 @@ export class DiscordBot {
         this.pendingTick = this.engine.tick(this.notificationRouter ?? ((run, part) => this.notify(run, part)), run => this.notifyWorking(run))
             .catch(error => console.error(`[MONITOR_ERROR] ${errorCode(error)}`)).finally(() => { this.pendingTick = undefined; });
     }
+    async waitForWorkingNoticeOperation(operation, sendStarted) {
+        const failure = () => sendStarted
+            ? new AppError('NOTIFICATION_UNKNOWN', '作業開始通知の送信結果が不明です。自動再送しません。')
+            : new AppError('DELIVERY_BLOCKED', '作業開始通知の宛先確認を完了できませんでした。');
+        if (this.workingNoticeAbort.signal.aborted || this.stopping)
+            throw failure();
+        let timer;
+        let onAbort;
+        const aborted = new Promise((_resolve, reject) => {
+            onAbort = () => reject(failure());
+            this.workingNoticeAbort.signal.addEventListener('abort', onAbort, { once: true });
+        });
+        const deadline = new Promise((_resolve, reject) => {
+            timer = setTimeout(() => reject(failure()), 10_000);
+        });
+        try {
+            return await Promise.race([operation, aborted, deadline]);
+        }
+        finally {
+            if (timer)
+                clearTimeout(timer);
+            if (onAbort)
+                this.workingNoticeAbort.signal.removeEventListener('abort', onAbort);
+        }
+    }
     async notifyWorking(run) {
         const preferences = run.notificationPreferences;
+        let sendStarted = false;
         if (run.guildId !== this.config.guildId || !preferences || !['dm', 'origin'].includes(preferences.destination))
             throw new AppError('DELIVERY_BLOCKED', '作業開始通知先を確認できません。');
         this.engine.policy.authorize(run.userId, run.guildId, run.channelId);
@@ -159,24 +187,26 @@ export class DiscordBot {
             nonce: digest(`${run.id}:work-start`).slice(0, 24), enforceNonce: true };
         try {
             if (preferences.destination === 'origin') {
-                const channel = await this.client.channels.fetch(run.channelId);
+                const channel = await this.waitForWorkingNoticeOperation(this.client.channels.fetch(run.channelId), false);
                 if (!channel || !channel.isSendable() || !('guildId' in channel) || channel.guildId !== run.guildId)
                     throw new AppError('DELIVERY_BLOCKED', '固定された作業開始通知先を確認できません。');
                 this.engine.policy.authorize(run.userId, run.guildId, run.channelId);
                 if (this.stopping || !this.client.isReady())
                     throw new AppError('DELIVERY_BLOCKED', '作業開始通知は停止されています。');
-                const sent = await channel.send(options);
+                sendStarted = true;
+                const sent = await this.waitForWorkingNoticeOperation(channel.send(options), true);
                 if (!/^\d{17,20}$/u.test(sent.id))
                     throw new AppError('NOTIFICATION_UNKNOWN', '作業開始通知の受領を確認できません。');
                 return { messageId: sent.id };
             }
-            const user = await this.client.users.fetch(run.userId);
+            const user = await this.waitForWorkingNoticeOperation(this.client.users.fetch(run.userId), false);
             if (!user || user.id !== run.userId)
                 throw new AppError('DELIVERY_BLOCKED', '固定された作業開始DM先を確認できません。');
             this.engine.policy.authorize(run.userId, run.guildId, run.channelId);
             if (this.stopping || !this.client.isReady())
                 throw new AppError('DELIVERY_BLOCKED', '作業開始通知は停止されています。');
-            const sent = await user.send(options);
+            sendStarted = true;
+            const sent = await this.waitForWorkingNoticeOperation(user.send(options), true);
             if (!/^\d{17,20}$/u.test(sent.id))
                 throw new AppError('NOTIFICATION_UNKNOWN', '作業開始通知の受領を確認できません。');
             return { messageId: sent.id };
@@ -187,7 +217,9 @@ export class DiscordBot {
             const raw = error && typeof error === 'object' ? error : {};
             if ([50007, 50013, 50001, 10003, 10013].includes(Number(raw.code)) || raw.status === 403 || raw.status === 401)
                 throw new AppError('DELIVERY_BLOCKED', '固定された作業開始通知先へ配信できません。');
-            throw new AppError('NOTIFICATION_UNKNOWN', '作業開始通知の送信結果が不明です。自動再送しません。');
+            if (sendStarted)
+                throw new AppError('NOTIFICATION_UNKNOWN', '作業開始通知の送信結果が不明です。自動再送しません。');
+            throw new AppError('DELIVERY_BLOCKED', '作業開始通知の宛先確認を完了できませんでした。');
         }
     }
     async notify(run, part) {
@@ -260,14 +292,20 @@ export class DiscordBot {
         }
     }
     async stop() {
+        if (this.stopTask)
+            return this.stopTask;
         this.stopping = true;
         this.connectionNoticeAbort.abort();
+        this.workingNoticeAbort.abort();
         if (this.timer)
             clearInterval(this.timer);
-        await Promise.allSettled([...this.handling]);
-        await this.pendingTick;
-        await this.connectionNoticeTask;
-        await this.client.destroy();
+        this.stopTask = (async () => {
+            await Promise.allSettled([...this.handling]);
+            await this.pendingTick;
+            await this.connectionNoticeTask;
+            await this.client.destroy();
+        })();
+        return this.stopTask;
     }
 }
 //# sourceMappingURL=bot.js.map

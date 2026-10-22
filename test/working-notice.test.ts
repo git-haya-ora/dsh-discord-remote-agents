@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { Config } from '../src/config.js';
 import { AppError } from '../src/errors.js';
 import { Engine, type Actor } from '../src/engine.js';
+import { DiscordBot } from '../src/bot.js';
 import { Policy } from '../src/policy.js';
 import { Store } from '../src/store.js';
 import type { AgentAdapter, SessionInfo, Snapshot, WireEvent } from '../src/types.js';
@@ -141,4 +142,44 @@ test('restart/replay retains sent and unknown markers and never auto-resends', a
   const reopenedUnknown = new Store(databasePath, true); const restoredUnknown = new Engine(created.adapter, reopenedUnknown, created.policy, [created.config.dshToken]);
   await restoredUnknown.tick(async () => {}, async () => { starts++; return { messageId: '55555555555555557' }; });
   assert.equal(starts, 1); assert.equal(reopenedUnknown.get('working-run')?.workNotice, 'unknown'); reopenedUnknown.close();
+});
+
+test('actual tick stop aborts a blocked working-notice lookup and ignores its late result', async t => {
+  const { config, engine, adapter, store } = await setup(t); adapter.log.push(...runStart('discord:working-run'));
+  const bot = new DiscordBot(config, engine, undefined, true); Object.defineProperty(bot.client, 'isReady', { value: () => true });
+  let release!: (value: { id: string; send(options: unknown): Promise<{ id: string }> }) => void;
+  let started!: () => void; const lookupStarted = new Promise<void>(resolve => { started = resolve; });
+  const lookup = new Promise<{ id: string; send(options: unknown): Promise<{ id: string }> }>(resolve => { release = resolve; });
+  let sends = 0, destroys = 0;
+  Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: () => { started(); return lookup; } });
+  Object.defineProperty(bot.client, 'destroy', { configurable: true, value: async () => { destroys++; } });
+  t.after(() => bot.stop());
+  (bot as unknown as { tick(): void }).tick(); await lookupStarted;
+  let deadline: NodeJS.Timeout | undefined;
+  const stopped = await Promise.race([bot.stop().then(() => true), new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), 250); })]);
+  if (deadline) clearTimeout(deadline);
+  assert.equal(stopped, true); assert.equal(destroys, 1); assert.equal(store.get('working-run')?.workNotice, 'blocked');
+  release({ id: actor.userId, send: async () => { sends++; return { id: '55555555555555555' }; } });
+  await Promise.resolve(); (bot as unknown as { tick(): void }).tick();
+  assert.equal(sends, 0); assert.equal(store.get('working-run')?.workNotice, 'blocked');
+});
+
+test('actual tick stop returns during working-notice send and retains unknown without retry', async t => {
+  const { config, engine, adapter, store } = await setup(t); adapter.log.push(...runStart('discord:working-run'));
+  const bot = new DiscordBot(config, engine, undefined, true); Object.defineProperty(bot.client, 'isReady', { value: () => true });
+  let release!: (value: { id: string }) => void; let started!: () => void;
+  const sendStarted = new Promise<void>(resolve => { started = resolve; });
+  const blockedSend = new Promise<{ id: string }>(resolve => { release = resolve; });
+  let sends = 0, destroys = 0;
+  Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: async () => ({ id: actor.userId, send: () => { sends++; started(); return blockedSend; } }) });
+  Object.defineProperty(bot.client, 'destroy', { configurable: true, value: async () => { destroys++; } });
+  t.after(() => bot.stop());
+  (bot as unknown as { tick(): void }).tick(); await sendStarted;
+  assert.equal(store.get('working-run')?.workNotice, 'unknown');
+  let deadline: NodeJS.Timeout | undefined;
+  const stopped = await Promise.race([bot.stop().then(() => true), new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), 250); })]);
+  if (deadline) clearTimeout(deadline);
+  assert.equal(stopped, true); assert.equal(destroys, 1); assert.equal(store.get('working-run')?.workNotice, 'unknown');
+  release({ id: '55555555555555555' }); await Promise.resolve(); (bot as unknown as { tick(): void }).tick();
+  assert.equal(sends, 1); assert.equal(store.get('working-run')?.workNotice, 'unknown');
 });

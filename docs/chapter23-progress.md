@@ -4,21 +4,21 @@
 
 ## 範囲と優先順
 
-1. A：正式に確認できたSessionサービスによる一覧・現在対象・Run一覧・診断（履歴はfield-filtered契約待ちで未登録）とコマンド整理。
-2. A：全文を順序付きpartへ分割する通知。Native相関・固定先・digest・各part状態・不明配送非再送を維持する。
-3. A：モデル／推論の一覧・取得・条件更新・再読込契約が未確認の場合は未対応理由を示す。指示文、DB編集、ASAR変更で代用しない。
+1. A：一覧・現在対象・Run一覧・診断、read-only model catalog、明示no-CAS同意付きtitle rename、実Native start相関後の「作業中」通知を実装。filtered historyはfield-filtered契約がなく未登録。
+2. A：全文を順序付きpartへ分割する通知。Native相関・固定先・digest・各part状態・不明配送非再送を維持する。送信完了後7日以内の保護durable出力／参照aware retentionはまだ未統合。
+3. A：model/reasoning mutationはHost既定も変更するNative APIのため無効。title renameはNative CASがなくDesktopとの競合を防げないため、明示同意・事前/事後Binding確認・readbackが必要でもfull AC-44/45保証ではない。context token/timingは真のcontext使用量として表示しない。
 4. B：DM-onlyは明示導入・受信の設計／実証対象。既存guild設定を自動移行せず、実Discord実証なしにDM受付を有効化しない。
-5. C：停止・承認・キュー・添付／Artifact・通常チャット・Native圧縮は未対応のまま。Telegram追加開発はしない。
+5. C：targeted stop・external approval・共有FIFO queue・添付/Artifact・通常chat・Native compact bridgeは、Native method/serviceが一部確認済みでもDiscord向けの認可/Run scope/durability/no-replay統合が未対応。Telegram追加開発はしない。
 
 ## 追加ACの扱い
 
 | 条件 | 本ブランチで検証するソース／fixture | 未完了の実機ゲート |
 | --- | --- | --- |
 | AC-43 | 登録schemaの階層上限、helpの実装整合、認可、検索／ページング | 実Discord登録・表示・実Host接続 |
-| AC-44・45 | モデル／推論操作を偽装せず未対応を説明 | 正式catalog／settings read・write・readback・revision契約とDesktop競合 |
+| AC-44・45 | read-only catalog/current projection、no-CAS title consent + Binding checks + readback、unsafe model mutation拒否 | Session-only settings CAS/readback、title CASまたはDesktop競合の閉鎖、real Host/Discord validation |
 | AC-46・47 | DM操作が既定拒否、既存guild運用を維持 | User Install・global BOT_DM・Gateway・component／modal、1対1 recipient検証、DM／guild同一Session一意性 |
 | AC-48 | 長文・日本語・emoji・コード・上限・順序・本文再構成 | 実Discord受信partとNative最終本文のdigest照合 |
-| AC-49 | Bot認証通知経路、固定先、blockedと実行状態の分離 | 15分超の実Run、実DM拒否・宛先削除・権限失効 |
+| AC-49 | Bot認証通知経路、固定先、actual-start相関、blockedと実行状態の分離、shutdown時lookup/send timeout fence | 15分超の実Run、実DM拒否・宛先削除・権限失効、Discord delivery/readback |
 | AC-50 | partごとのdurable状態、送信後保存前crash、429・timeout、通知のみretry | 実Host／Discordの再起動・障害・照合 |
 | AC-51 | 将来Runだけに通知方針適用、origin／重複リスクの明示確認 | 正式Native設定resetは未対応 |
 | AC-52 | 既存unknown・Run送信先・本文非平文の維持 | DM-only設定・正式前方移行／復旧は未実装 |
