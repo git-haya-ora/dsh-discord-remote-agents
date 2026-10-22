@@ -206,6 +206,10 @@ export class Engine {
         if (hydrateBody) { await this.restoreBody(run); await this.session(run.sessionId, run); }
         this.policy.authorize(actor.userId, actor.guildId, actor.channelId); this.checkOwner(actor, run);
       }
+      if (run.requiresProtectedOutput && !run.bodyMissing && run.protectedOutput?.state === 'published') {
+        if (!requireLiveAccess) throw new AppError('PROTECTED_OUTPUT_UNAVAILABLE', '同一Native Sessionの確認なしでは本文を返せません。');
+        this.assertProtectedReadCurrent(run, run.protectedOutput);
+      }
     } return run;
   }
   notificationPreferences(actor: Actor): NotificationPreferences & { pending: number; unknown: number; blocked: number; incomplete: number; undeliveredParts: number } {
@@ -236,6 +240,10 @@ export class Engine {
   async resultPage(actor: Actor, id?: string, page = 1): Promise<{ content: string; page: number; pages: number }> {
     const run = await this.status(actor, id);
     if (!run) throw new AppError('RUN_NOT_FOUND', 'この操作元の実行履歴が見つかりません。');
+    if (run.requiresProtectedOutput && !run.bodyMissing && run.protectedOutput?.state === 'published') {
+      this.policy.authorize(actor.userId, actor.guildId, actor.channelId); this.checkOwner(actor, run);
+      this.assertProtectedReadCurrent(run, run.protectedOutput);
+    }
     const text = terminal(run.state) ? run.result : run.contaminated ? '混在した出力は表示できません。' : run.output || run.result || 'テキスト出力はまだありません。';
     // Manual pages are independent of the automatic delivery cap.
     const plan = splitFinalOutput(text, run.id, false);
@@ -395,13 +403,21 @@ export class Engine {
   private assertProtectedReadCurrent(run: Run, manifest: NonNullable<Run['protectedOutput']>): Run {
     const current = this.store.get(run.id);
     if (run.bodyExpiresAt !== undefined && Date.now() >= run.bodyExpiresAt || current?.bodyExpiresAt !== undefined && Date.now() >= current.bodyExpiresAt) throw new AppError('BODY_EXPIRED', '本文の保持期限（7日）を過ぎました。');
+    const intent = this.store.protectedIntent(run.id);
     if (!current?.protectedOutput || current.protectedOutput.state !== 'published' || current.protectedOutput.intentId !== manifest.intentId
       || current.protectedOutput.bodyDigest !== manifest.bodyDigest || current.protectedOutput.deliveryPlanDigest !== manifest.deliveryPlanDigest
       || current.protectedOutput.outputDigest !== manifest.outputDigest || JSON.stringify(current.protectedOutput.items) !== JSON.stringify(manifest.items)
+      || current.protectedOutput.resolvedAt !== current.bodyResolvedAt || current.protectedOutput.expiresAt !== current.bodyExpiresAt
+      || !intent || intent.state !== 'published' || intent.intentId !== manifest.intentId || intent.outputDigest !== manifest.outputDigest
+      || intent.bodyDigest !== manifest.bodyDigest || intent.deliveryPlanDigest !== manifest.deliveryPlanDigest
+      || intent.resolvedAt !== current.bodyResolvedAt || intent.expiresAt !== current.bodyExpiresAt
+      || JSON.stringify(intent.items) !== JSON.stringify(manifest.items) || JSON.stringify(intent.deletedRefs) !== JSON.stringify(manifest.deletedRefs)
       || current.sessionId !== run.sessionId || current.requestId !== run.requestId || current.bodyDigest !== run.bodyDigest
       || current.bindingVersion !== run.bindingVersion || current.delivery?.digest !== run.delivery?.digest || !terminal(current.state) || current.state !== run.state) {
       throw new AppError('PROTECTED_OUTPUT_CONFLICT', '保護出力の永続Run・expiry・intent状態が変わりました。');
     }
+    const key = this.key(current);
+    if (this.store.binding(key) !== current.sessionId || this.store.bindingVersion(key) !== current.bindingVersion) throw new AppError('BINDING_CONFLICT', '保護出力を確認するSession選択が変更されました。');
     this.validateProtectedManifestScope(current, current.protectedOutput);
     return current;
   }

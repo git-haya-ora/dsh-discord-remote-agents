@@ -79,9 +79,12 @@ class SyntheticAdapter implements AgentAdapter {
   promptCalls = 0;
   promptFailure?: Error;
   failEventReads = false;
+  listCalls = 0;
+  gateListCall?: number;
+  onList?: (call: number) => void | Promise<void>;
   inbox: Record<string, unknown> = { 'next-turn': [], 'next-step': [] };
   constructor(cwd: string) { this.session = { sessionId: 'native-session-synthetic', cwd, running: false, title: 'synthetic', subagent: false, updatedAt: 1 }; }
-  async list(): Promise<SessionInfo[]> { return [this.session]; }
+  async list(): Promise<SessionInfo[]> { const call = ++this.listCalls; await this.onList?.(call); return [this.session]; }
   async create(): Promise<string> { return this.session.sessionId; }
   async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? 0, values: { inbox: this.inbox } }; }
   async events(_sessionId: string, through: number, after: number): Promise<WireEvent[]> {
@@ -122,6 +125,15 @@ async function completedRun(f: Awaited<ReturnType<typeof setup>>, id = 'protecte
   const deliveries: string[] = [];
   await f.engine.tick(async (_run, part) => { if (part) deliveries.push(part.content); return { messageId: `synthetic-message-${deliveries.length}` }; });
   return { run: f.store.get(id)!, deliveries };
+}
+
+function gateFinalStatusSession(f: Awaited<ReturnType<typeof setup>>): { reached: Promise<void>; release(): void } {
+  let targetCall = -1, signal!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { signal = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  f.payload.onRead = () => { targetCall = f.adapter.listCalls + 2; };
+  f.adapter.onList = async call => { if (call === targetCall) { signal(); await gate; } };
+  return { reached, release };
 }
 
 test('protected quota await rechecks the original binding generation including A-B-A before prompt', async t => {
@@ -173,6 +185,30 @@ test('protected output commits only after exact readback, avoids SQLite plaintex
   const retired = f.store.get(run.id)!;
   assert.equal(retired.protectedOutput?.state, 'retired'); assert.equal(retired.bodyMissing, true);
   assert.equal(f.payload.values.size, 0);
+});
+
+test('hydrated Engine.status cannot return a body after post-restore Session authorization stalls past TTL', async t => {
+  const f = await setup(t), { run } = await completedRun(f, 'status-post-restore-expiry');
+  const gate = gateFinalStatusSession(f), status = f.engine.status(actor, run.id), expiresAt = run.bodyExpiresAt!;
+  await gate.reached;
+  const systemNow = Date.now; Date.now = () => expiresAt;
+  try {
+    await f.engine.tick(async () => assert.fail('sent output must not be replayed'));
+    assert.equal(f.store.get(run.id)?.protectedOutput?.state, 'retired'); assert.equal(f.payload.values.size, 0);
+    gate.release(); await assert.rejects(status, { code: 'BODY_EXPIRED' });
+  } finally { gate.release(); Date.now = systemNow; delete f.payload.onRead; delete f.adapter.onList; }
+});
+
+test('Engine.resultPage cannot format a body after post-restore Session authorization stalls past TTL', async t => {
+  const f = await setup(t), { run } = await completedRun(f, 'result-post-restore-expiry');
+  const gate = gateFinalStatusSession(f), page = f.engine.resultPage(actor, run.id), expiresAt = run.bodyExpiresAt!;
+  await gate.reached;
+  const systemNow = Date.now; Date.now = () => expiresAt;
+  try {
+    await f.engine.tick(async () => assert.fail('sent output must not be replayed'));
+    assert.equal(f.store.get(run.id)?.protectedOutput?.state, 'retired'); assert.equal(f.payload.values.size, 0);
+    gate.release(); await assert.rejects(page, { code: 'BODY_EXPIRED' });
+  } finally { gate.release(); Date.now = systemNow; delete f.payload.onRead; delete f.adapter.onList; }
 });
 
 test('published output restores after Store/Engine restart without Native history and rejects a different deployment identity', async t => {

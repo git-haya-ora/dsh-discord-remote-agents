@@ -18,6 +18,7 @@
 - Desktopとconnectorの共有原子的受付、安定したNative receipt、重複claimと予約の共通線形化点。plugin mutexや状態照会だけでは代替しません。
 - trusted owner/bootstrapとcaller-bound認可、独立owner/admin、失効とOrigin/CSRFの正式契約。単一認証operatorやCookieを独立権限分離とは扱いません。
 - 正式なfiltered history、Session-only model/reasoning selectionとsettings reset、鮮度・要求相関が保証されたcontext使用量、DM-only、targeted Run停止、外部承認/event、共有Desktopと一体のFIFO queue、添付・Artifact・compact・通常chat、設定C。Native API/projectionの存在をDiscord bridge要件の達成とは扱わず、未対応操作をUIで完了済みに見せません。
+- hydrated status／result readは、最後のNative Session authorization await後にもdeployment／Binding version／intent／TTL／manifestを再検証し、期限をまたいだ返却を拒否する回帰を追加しました（synthetic race fixtureのみ）。
 - OUT08の未完了分：90日metadata/tombstone pruning、全process-kill／電源断／複数Store・cross-process quota競合の完全検証、official Native durable receipt/provenance、live Host/Discord受入。孤立・未認識blobは容量に算入し、自動削除しません。
 - 正式Plugin Manager導入・同じGUIでの表示、新tokenによるDiscordログイン・コマンド登録、PC↔Discordの同一Session往復、配備root・復旧・長時間運転。mock、synthetic SQLite/DPAPI、pack/import成功では閉じません。
 
