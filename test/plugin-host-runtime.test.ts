@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Store } from '../src/store.js';
 import type { Engine } from '../src/engine.js';
 const { DiscordHost, validateBot } = await import(new URL('../../packages/discord-plugin/host-runtime.js', import.meta.url).href) as typeof import('../packages/discord-plugin/host-runtime.js');
+const { apply: applyDiscordPlugin, inject: requiredDiscordServices } = await import(new URL('../../packages/discord-plugin/index.js', import.meta.url).href) as { apply(ctx: unknown, config?: unknown): void; inject: string[] };
 const guildId = '222222222222222222', applicationId = '444444444444444444';
 const syntheticToken = 'synthetic.fixture.NOT-A-REAL-TOKEN';
 async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => Promise<void>, noticeFailure = false, noticeGate?: Promise<{ sent: number; failed: number }>) {
@@ -34,6 +35,46 @@ async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => 
   t.after(async () => { await host.dispose(); await rm(root, { recursive: true, force: true }); });
   return { host, ctx, store, secrets, settings, noticeCalls: () => noticeCalls, engine: () => { assert.ok(currentEngine); return currentEngine; }, counts: () => ({ creates, receiverCreates, receiverStops }), failRetirement: () => { failRetire = true; } };
 }
+test('Native Compact services are optional; their absence preserves base Host startup', async t => {
+  const f = await setup(t);
+  assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings: f.settings, token: syntheticToken })).ok, true);
+  const started = await f.host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true });
+  assert.equal(started.ok, true);
+  assert.equal(f.host.status().state, 'connected');
+  assert.equal(f.host.status().capabilities.text, true);
+  assert.equal(f.counts().receiverCreates, 1);
+});
+
+test('Discord plugin keeps commands optional and forwards presence/withdrawal through Host injection', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'compact-plugin-wiring-synthetic-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  let injectNames: string[] | undefined;
+  let receiveCommands: ((commands?: unknown) => boolean) | undefined;
+  const effects: Array<() => unknown> = [];
+  const ctx: {
+    connection: { fetch: { register(): () => void } };
+    sessionController: { list(): Promise<void>; create(): Promise<void>; projections(): Promise<void>; page(): Promise<void>; prompt(): Promise<void> };
+    agents: { get(): void } | undefined;
+    inject(names: string[], callback: (commands?: unknown) => boolean): void;
+    effect(callback: () => unknown): void;
+  } = {
+    connection: { fetch: { register() { return () => {}; } } },
+    sessionController: { async list() {}, async create() {}, async projections() {}, async page() {}, async prompt() {} },
+    agents: { get() {} },
+    inject(names, callback) { injectNames = names; receiveCommands = callback; },
+    effect(callback) { effects.push(callback); }
+  };
+  applyDiscordPlugin(ctx, { dataRoot: root });
+  assert.deepEqual(requiredDiscordServices, ['connection', 'sessionController']);
+  assert.deepEqual(injectNames, ['commands']);
+  assert.equal(effects.length, 2);
+  assert.equal(receiveCommands!(undefined), false);
+  const commands = { find() {}, execute() {} };
+  assert.equal(receiveCommands!(commands), true);
+  ctx.agents = undefined;
+  assert.equal(receiveCommands!(undefined), false);
+});
+
 test('slow notice delivery does not block connected management status', { timeout: 5000 }, async t => {
   let release!: (value: { sent: number; failed: number }) => void;
   const gate = new Promise<{ sent: number; failed: number }>(resolve => { release = resolve; });

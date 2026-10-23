@@ -202,7 +202,8 @@ function helpFor(topic: string | null): string {
     models: '利用可能model catalogは/agent modelsで検索できます。provider/modelとNativeが公開するmodel別reasoning effort候補だけを表示し、provider failure本文は表示しません。model選択は未対応です。',
     reasoning: 'reasoning effort候補は/agent modelsと/agent currentに表示します。effort変更は正式なSession専用read/write/CAS/readback適用確認がないため未対応です。',
     settings: '/agent settings title value:<title>（/agent rename alias）は待機Sessionのtitleだけ変更します。model/reasoning settings変更・resetはSession単位の安全なrevision/CAS/readback根拠がないため未対応です。',
-    context: 'context未対応: Native projectionはsessionStatsのtiming/count/token集計だけで実際のcontext使用量・上限を保証しません。推測値を実測として表示しません。',
+    context: 'contextの実測値・上限・使用率は未対応です。/agent context compact confirm:trueは明示確認の上でNative commandを実行します。結果不明の場合は再送せずDSH GUIで確認してください。',
+    compact: 'Native Compact commandを実行します。Session historyを変更する可能性があり、成功はsourceEventSeq付きNative command結果でのみ確定します。結果不明は再送せずDSH GUIで確認してください。',
     dm: 'DM-onlyは設計・実証待ちです。コマンド登録はserver-onlyで、DM slash/通常メッセージは受け付けません。完了通知DMはDM操作の根拠ではありません。',
     stop: 'stop未対応: 特定Run停止は未対応です。Native Session cancelはSession全体対象でRun/turn/CAS指定がありません。他のDesktop実行を止めない保証がないため代用しません。DSH GUIを利用してください。',
     approval: 'remote approvalは未対応です。Native ApprovalServiceは同一process内のrequest/decide pipelineですが、Discord actor/Run scope・期限・version/CASの契約を確認できません。DSH GUIを利用してください。',
@@ -213,6 +214,12 @@ function helpFor(topic: string | null): string {
   if (normalized === 'history') return 'history未対応・未登録: 現行Native page契約にevent type/fieldを限定する正式filterがなく、reasoning/secretsを取得しない保証がありません。raw pageを取得してcommand側で後から絞る代替は行いません。結果は/agent resultで確認してください。';
   if (normalized === 'notifications' || normalized === 'notification') return 'notifications showは宛先・本人/Guild/Channel/Binding scope・pending/unknown/sending/blocked/incomplete/未送信part件数を表示します。進捗通知は未対応で最終回答のみです。setは今後のRunだけに適用され、originには選択Bindingのある現在scopeへの明示確認が必要です。retryは通知だけが対象で、Native promptを再送しません。';
   return unavailable[normalized] ?? HELP;
+}
+
+function compactResponse(state: 'completed' | 'noop' | 'unknown'): string {
+  if (state === 'completed') return 'Native Compact commandの成功を記録しました（完了eventを確認済み）。内容の変化はDSH GUIで確認してください。';
+  if (state === 'noop') return 'Native Compactをcanonical no-opとして記録しました。Session全体が不変という意味ではありません。';
+  return 'Native Compactの結果は不明です。実行済みの可能性があります。再送せず、DSH GUIで状態を確認してください。';
 }
 
 export async function handleAgentCommand(
@@ -261,6 +268,14 @@ export async function handleAgentCommand(
     }
     throw new AppError('UNKNOWN_COMMAND', '未対応のnotifications操作です。');
   }
+
+  if (sub === 'compact') {
+    if (group !== null && group !== 'context') throw new AppError('UNKNOWN_COMMAND', '未対応のcontext操作です。');
+    if (interaction.options.getBoolean('confirm', true) !== true) throw new AppError('CONFIRMATION_REQUIRED', 'Native CompactがSession contextを変更する可能性をconfirm:trueで確認してください。');
+    const outcome = await engine.compact(actor, true);
+    return { content: compactResponse(outcome.state) };
+  }
+  if (group === 'context') throw new AppError('UNKNOWN_COMMAND', '未対応のcontext操作です。');
 
   switch (sub) {
     case 'help':
@@ -445,13 +460,14 @@ export async function handleAgentCommand(
       const capabilities = [
         ['list', typeof adapter.list === 'function'], ['create', typeof adapter.create === 'function'],
         ['snapshot/projections', typeof adapter.snapshot === 'function'], ['prompt', typeof adapter.prompt === 'function'],
-        ['model catalog', typeof adapter.modelCatalog === 'function'], ['Session title rename', typeof adapter.rename === 'function']
+        ['model catalog', typeof adapter.modelCatalog === 'function'], ['Session title rename', typeof adapter.rename === 'function'],
+        ['Native Compact command', typeof adapter.executeCompact === 'function']
       ].map(([name, available]) => `${name}: ${available ? 'adapter method available' : 'unavailable'}`);
       const preferences = engine.notificationPreferences(actor);
       const lastRunError = engine.store.allRuns()
         .filter(run => run.userId === actor.userId && run.guildId === actor.guildId && run.channelId === actor.channelId && run.lastError)
         .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.lastError;
-      return { content: `接続診断（server-only / authorized）\n${connectivity}\nAdapter mapping:\n${capabilities.join('\n')}\nNative version: 不明（Adapterの公開契約なし）\nHistory: unavailable（Native pageにevent/field filterなし）\nModel catalog: methodがあればread-only表示可能。model/reasoning選択はHost既定も変える可能性があり未対応\nSettings reset: unavailable（Session専用CAS/readbackなし）\nContext: sessionStatsの実測context使用量・上限は保証なし\n通知滞留: ${preferences.pending} pending / ${preferences.unknown} unknown/sending / ${preferences.blocked} blocked / ${preferences.incomplete} incomplete / ${preferences.undeliveredParts} 未送信part\n最後の安全なエラーコード: ${lastRunError ? safeErrorLabel(lastRunError) : '記録なし'}\nToken・ローカルパス・raw errorは表示しません。` };
+      return { content: `接続診断（server-only / authorized）\n${connectivity}\nAdapter mapping:\n${capabilities.join('\n')}\nNative version: 不明（Adapterの公開契約なし）\nHistory: unavailable（Native sessionQuery.filterEvents is available, but role/output and bounded materialization are not safely implemented）\nModel catalog: methodがあればread-only表示可能。model/reasoning選択はHost既定も変える可能性があり未対応\nSettings reset: unavailable（Session専用CAS/readbackなし）\nContext: sessionStatsの実測context使用量・上限は保証なし\n通知滞留: ${preferences.pending} pending / ${preferences.unknown} unknown/sending / ${preferences.blocked} blocked / ${preferences.incomplete} incomplete / ${preferences.undeliveredParts} 未送信part\n最後の安全なエラーコード: ${lastRunError ? safeErrorLabel(lastRunError) : '記録なし'}\nToken・ローカルパス・raw errorは表示しません。` };
     }
     default:
       throw new AppError('UNKNOWN_COMMAND', '未対応コマンドです。/agent helpで使用可能な操作を確認してください.');

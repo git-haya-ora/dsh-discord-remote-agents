@@ -6,9 +6,58 @@ const methods = ['list', 'create', 'projections', 'page', 'prompt'];
 const rejectedBeforeAdmission = new Set(['gateway/bad-request', 'session/not-found', 'session/writer-held', 'session/model-unavailable', 'session/invalid-time-zone']);
 function protocol() { throw new AppError('DSH_PROTOCOL', 'Native Sessionの応答形式が未対応です。PCで確認してください。'); }
 export class NativeSessionAdapter {
-  constructor(controller, store, signal = new AbortController().signal) {
+  constructor(controller, store, signal = new AbortController().signal, commands, agents) {
     if (!controller || methods.some(method => typeof controller[method] !== 'function')) throw new AppError('HOST_COMPATIBILITY_UNVERIFIED', '正式Native Session serviceが利用できません。');
     this.controller = controller; this.store = store; this.signal = signal; this.verifiedSessions = new Set();
+    this.compactTargets = new WeakMap(); this.attachCompactServices(commands, agents);
+  }
+  attachCompactServices(commands, agents) {
+    this.commands = commands && typeof commands.find === 'function' && typeof commands.execute === 'function' ? commands : undefined;
+    this.agents = agents && typeof agents.get === 'function' ? agents : undefined;
+    return !!(this.commands && this.agents && typeof this.controller.resolveAgent === 'function');
+  }
+  async prepareCompactTarget(sessionId, cwd) {
+    const unavailable = () => new AppError('COMPACT_UNAVAILABLE', 'このHostでは正式なCompact commandを確認できません。PCで確認してください。');
+    if (!this.commands || !this.agents || typeof this.controller.resolveAgent !== 'function') throw unavailable();
+    this.signal.throwIfAborted();
+    let resolved;
+    try {
+      const signal = AbortSignal.any([this.signal, AbortSignal.timeout(30000)]);
+      let abort; const interrupted = new Promise((_, reject) => { abort = () => reject(signal.reason); signal.addEventListener('abort', abort, { once: true }); });
+      try { resolved = await Promise.race([this.controller.resolveAgent(sessionId), interrupted]); }
+      finally { signal.removeEventListener('abort', abort); }
+    } catch { throw unavailable(); }
+    if (!resolved || resolved.error || !resolved.agent) throw unavailable();
+    const agent = resolved.agent, session = agent.session, header = session?.header;
+    if (agent.id !== sessionId || !header || header.id !== sessionId || header.cwd !== cwd || header.origin === 'subagent' || header.parentSession != null
+      || this.agents.get(sessionId) !== agent) throw unavailable();
+    let definition;
+    try { definition = this.commands.find(agent, 'compact'); } catch { throw unavailable(); }
+    if (!definition || definition.definitionId !== '@deepseek-ai/dsh-command-compact') throw unavailable();
+    const target = Object.freeze({ sessionId, agentId: agent.id, cwd, definitionId: '@deepseek-ai/dsh-command-compact' });
+    this.compactTargets.set(target, { agent, session });
+    return target;
+  }
+  isCompactTargetCurrent(target) {
+    const captured = target && typeof target === 'object' ? this.compactTargets.get(target) : undefined;
+    if (!captured || this.signal.aborted || !this.commands || !this.agents || this.agents.get(target.sessionId) !== captured.agent
+      || captured.agent.id !== target.sessionId || captured.agent.session !== captured.session || captured.session.header?.id !== target.sessionId
+      || captured.session.header?.cwd !== target.cwd || captured.session.header?.origin === 'subagent' || captured.session.header?.parentSession != null
+      || target.definitionId !== '@deepseek-ai/dsh-command-compact') return false;
+    try { return this.commands.find(captured.agent, 'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'; }
+    catch { return false; }
+  }
+  async executeCompact(target, signal) {
+    if (!this.isCompactTargetCurrent(target) || signal?.aborted) throw new AppError('COMPACT_TARGET_CHANGED', 'Compact対象のAgentが変化しました。実行結果をPCで確認してください。');
+    const captured = this.compactTargets.get(target);
+    const executionSignal = AbortSignal.any([this.signal, signal, AbortSignal.timeout(60000)]);
+    let abort; const interrupted = new Promise((_, reject) => { abort = () => reject(new AppError('COMPACT_OUTCOME_UNKNOWN', 'Compactの応答を確認できません。自動再実行せずPCで確認してください。')); executionSignal.addEventListener('abort', abort, { once: true }); });
+    let operation;
+    try {
+      // Exact Host command: never substitute prompt, a name-only descriptor, or a private Native API.
+      operation = this.commands.execute(captured.agent, '/compact', [], executionSignal);
+    } catch { executionSignal.removeEventListener('abort', abort); throw new AppError('COMPACT_OUTCOME_UNKNOWN', 'Compactの結果を確認できません。自動再実行せずPCで確認してください。'); }
+    return Promise.race([Promise.resolve(operation), interrupted]).finally(() => executionSignal.removeEventListener('abort', abort));
   }
   async call(method, request) {
     this.signal.throwIfAborted();

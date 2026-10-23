@@ -118,7 +118,7 @@ export class DiscordHost {
     this.ctx = ctx; this.internals = internals;
     this.state = 'unconfigured'; this.lastError = ''; this.disposed = false; this.busy = false; this.bot = undefined; this.store = undefined; this.startGeneration = 0;
     this.settingsState = { profile, revision: 0, settings: null, secretRef: null, bot: null, retireRefs: [] };
-    this.nativeAbort = new AbortController(); this.lifecycleAbort = new AbortController();
+    this.nativeAbort = new AbortController(); this.lifecycleAbort = new AbortController(); this.compactServices = undefined;
     try {
       keys(config, ['dataRoot']);
       const root = config.dataRoot ?? (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'DSHDiscordRemoteAgents', profile) : undefined);
@@ -127,6 +127,11 @@ export class DiscordHost {
       if (typeof ctx?.connection?.fetch?.register !== 'function' || !ctx?.sessionController || ['list', 'create', 'projections', 'page', 'prompt'].some(name => typeof ctx.sessionController[name] !== 'function')) fail('HOST_COMPATIBILITY_UNVERIFIED');
       this.compatible = true;
     } catch (error) { this.compatible = false; this.state = 'blocked'; this.lastError = safeCode(error); }
+  }
+  attachCompactServices(commands, agents) {
+    this.compactServices = commands && agents ? { commands, agents } : undefined;
+    if (this.adapter) this.adapter.attachCompactServices(commands, agents);
+    return this.adapter ? this.adapter.commands !== undefined : !!(commands && agents);
   }
   async initialize() {
     if (this.disposed) fail('DISPOSED');
@@ -154,7 +159,8 @@ export class DiscordHost {
         this.secretStore = this.internals.secretStore ?? new WindowsSecretStore(join(this.dataRoot, 'secrets'));
         this.protectedPayloadStore = this.internals.protectedPayloadStore ?? new WindowsProtectedPayloadStore(join(this.dataRoot, 'protected-output'));
         this.store = store;
-        this.adapter = new NativeSessionAdapter(this.ctx.sessionController, store, this.nativeAbort.signal);
+        this.adapter = new NativeSessionAdapter(this.ctx.sessionController, store, this.nativeAbort.signal,
+          this.compactServices?.commands, this.compactServices?.agents);
         this.state = this.settingsState.settings ? 'stopped' : 'unconfigured';
         store.recoverDispatches();
         await this.retireOldSecrets();

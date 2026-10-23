@@ -8,7 +8,7 @@
 2. A：全文を順序付きpartへ分割する通知。Native相関・固定先・digest・各part状態・不明配送非再送を維持する。終端本文/partのDPAPI保護保存、readback、intent/quota、確定receipt後7日retentionとexact-ref cleanupを部分実装。90日metadata pruning、全process-kill/cross-process quota proof、official Native receipt、live acceptanceは未完了。
 3. A：model/reasoning mutationはHost既定も変更するNative APIのため無効。title renameはNative CASがなくDesktopとの競合を防げないため、明示同意・事前/事後Binding確認・readbackが必要でもfull AC-44/45保証ではない。context token/timingは真のcontext使用量として表示しない。
 4. B：DM-onlyは明示導入・受信の設計／実証対象。既存guild設定を自動移行せず、実Discord実証なしにDM受付を有効化しない。
-5. C：targeted stop・external approval・共有FIFO queue・添付/Artifact・通常chat・Native compact bridgeは、Native method/serviceが一部確認済みでもDiscord向けの認可/Run scope/durability/no-replay統合が未対応。Telegram追加開発はしない。
+5. C：targeted stop・external approval・共有FIFO queue・添付/Artifact・通常chatは未対応。Native Compactは明示確認付きcommand、対象Agent/Session再確認、idle/queue guard、durable unknown/no-replayを実装したが、synthetic fixtureの成功を実Native／Discord受け入れとは扱わない。Telegram追加開発はしない。
 
 ## 追加ACの扱い
 

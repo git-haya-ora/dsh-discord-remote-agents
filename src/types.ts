@@ -5,6 +5,19 @@ export interface CatalogGroup { id: string; name: string; models: CatalogModel[]
 // Safe Host DTO: raw provider failure messages are intentionally discarded by the adapter.
 export interface ModelCatalog { default: SessionModel; routableProviders: string[]; groups: CatalogGroup[]; failedProviders: number }
 export interface SessionRenameValue { title: string; seq: number }
+export type CompactMaintenanceState = 'unknown' | 'completed' | 'noop';
+/** Local no-replay journal only; it never asserts Native history text was erased. */
+export interface CompactMaintenanceIntent {
+  schemaVersion: 1; intentId: string; sessionId: string; agentId: string; applicationId: string; botId: string;
+  ownerId: string; guildId: string; channelId: string; bindingMode: 'actor' | 'shared'; bindingId: string; bindingVersion: number;
+  workspaceDigest: string; definitionId: '@deepseek-ai/dsh-command-compact'; state: CompactMaintenanceState; dispatchedAt: number;
+  commandId?: string; sourceEventSeq?: number; outcomeAt?: number;
+}
+export interface CompactTarget { readonly sessionId: string; readonly agentId: string; readonly cwd: string; readonly definitionId: '@deepseek-ai/dsh-command-compact' }
+export interface CompactExecution {
+  readonly commandId: string;
+  readonly result: { readonly kind: 'success'; readonly text?: string; readonly sourceEventSeq?: number } | { readonly kind: 'error'; readonly text: string };
+}
 export interface SessionInfo {
   sessionId: string; cwd?: string; running: boolean; title: string;
   subagent: boolean; updatedAt: number;
@@ -76,4 +89,7 @@ export interface AgentAdapter {
   modelCatalog?(): Promise<ModelCatalog>;
   rename?(request: { sessionId: string; title: string }): Promise<SessionRenameValue>;
   verifySession?(sessionId: string): Promise<void>;
+  prepareCompactTarget?(sessionId: string, cwd: string): Promise<CompactTarget>;
+  isCompactTargetCurrent?(target: CompactTarget): boolean;
+  executeCompact?(target: CompactTarget, signal: AbortSignal): Promise<CompactExecution | undefined>;
 }

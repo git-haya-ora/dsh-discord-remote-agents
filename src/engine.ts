@@ -4,7 +4,7 @@ import { DshRejected, object } from './protocol.js';
 import { assistantText, boundedOutput, redact, finalAssistantText, digest, splitFinalOutput } from './output.js';
 import { bindingKey, MAX_ACTIVE_RUN_METADATA_RESERVE, PROTECTED_OUTPUT_RETENTION_MS, Store } from './store.js';
 import { Policy } from './policy.js';
-import type { AgentAdapter, Run, SessionInfo, WireEvent, NotificationPreferences, DeliveryPart, BridgeOutputContext, ProtectedOutputIntent, ProtectedOutputItem, ProtectedPayloadStore } from './types.js';
+import type { AgentAdapter, CompactExecution, CompactMaintenanceIntent, CompactMaintenanceState, CompactTarget, Run, SessionInfo, WireEvent, NotificationPreferences, DeliveryPart, BridgeOutputContext, ProtectedOutputIntent, ProtectedOutputItem, ProtectedPayloadStore } from './types.js';
 import { terminal } from './types.js';
 export interface Actor { userId: string; guildId: string; channelId: string }
 export type Notify = (run: Run, part?: { index: number; content: string }) => Promise<void | { messageId: string }>;
@@ -110,6 +110,105 @@ export class Engine {
     this.store.bind(this.key(actor), sessionId, expectedVersion, this.sharedDiscordBindings);
   }
   unbind(actor: Actor): void { this.policy.authorize(actor.userId, actor.guildId, actor.channelId); this.store.unbind(this.key(actor)); }
+  async compact(actor: Actor, confirmed: boolean): Promise<CompactMaintenanceIntent> {
+    this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+    if (!confirmed) throw new AppError('COMPACT_CONFIRMATION_REQUIRED', '実行前に明示確認が必要です。');
+    const sessionId = this.binding(actor), bindingVersion = this.bindingVersion(actor);
+    if (!sessionId) throw new AppError('NOT_BOUND', '先にDSH Sessionを選択してください。');
+    const identity = this.protectedIdentity;
+    if (!identity?.applicationId || !identity.botId) throw new AppError('COMPACT_UNAVAILABLE', 'Compactの対象情報を確認できません。');
+    if (!this.adapter.prepareCompactTarget || !this.adapter.isCompactTargetCurrent || !this.adapter.executeCompact)
+      throw new AppError('COMPACT_UNAVAILABLE', 'Native Compact commandを利用できません。');
+    return this.withSessionMutation(sessionId, async () => {
+      const assertSelection = (): void => {
+        this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+        if (this.binding(actor) !== sessionId || this.bindingVersion(actor) !== bindingVersion)
+          throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+      };
+      const assertNoRun = (): void => {
+        if (this.store.active().some(run => run.sessionId === sessionId)) throw new AppError('SESSION_BUSY', 'このSessionには未完了のBridge Runがあります。');
+      };
+      const inspectIdle = async (expectedCursor?: number): Promise<{ session: SessionInfo; cursor: number }> => {
+        assertSelection();
+        assertNoRun();
+        const session = await this.session(sessionId, actor);
+        assertSelection();
+        if (typeof session.running !== 'boolean') throw new AppError('SESSION_STATE_UNKNOWN', 'Native Sessionの実行状態を確認できません。');
+        if (session.running) throw new AppError('SESSION_BUSY', 'Native Sessionが実行中です。');
+        if (!session.cwd) throw new AppError('WORKSPACE_DENIED', 'Sessionのworkspaceを確認できません。');
+        const snapshot = await this.adapter.snapshot(sessionId);
+        assertSelection();
+        if (!snapshot || typeof snapshot !== 'object' || !snapshot.values || typeof snapshot.values !== 'object'
+          || !Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < 0 || Object.is(snapshot.cursor, -0))
+          throw new AppError('SESSION_STATE_UNKNOWN', 'Native Sessionの状態を確認できません。');
+        let inbox: Record<string, unknown>;
+        try { inbox = object(snapshot.values.inbox); }
+        catch { throw new AppError('SESSION_STATE_UNKNOWN', 'Native queue状態を確認できません。'); }
+        const nextTurn = inbox['next-turn'], nextStep = inbox['next-step'];
+        if (!Array.isArray(nextTurn) || !Array.isArray(nextStep)) throw new AppError('SESSION_STATE_UNKNOWN', 'Native queue状態を確認できません。');
+        if (nextTurn.length || nextStep.length) throw new AppError('SESSION_BUSY', 'Native queueに未処理の入力があります。');
+        if (expectedCursor !== undefined && snapshot.cursor !== expectedCursor) throw new AppError('SESSION_CHANGED', 'Native SessionがCompact確認中に変わりました。');
+        assertNoRun();
+        return { session, cursor: snapshot.cursor };
+      };
+      const initial = await inspectIdle();
+      const cwd = initial.session.cwd!;
+      const target = await this.adapter.prepareCompactTarget!(sessionId, cwd);
+      assertSelection();
+      if (target.sessionId !== sessionId || target.cwd !== cwd || !target.agentId
+        || target.definitionId !== '@deepseek-ai/dsh-command-compact' || !this.adapter.isCompactTargetCurrent!(target))
+        throw new AppError('COMPACT_TARGET_CHANGED', 'Native Compact対象が変わりました。再確認してください。');
+      const fresh = await inspectIdle(initial.cursor);
+      if (fresh.session.cwd !== cwd || !this.adapter.isCompactTargetCurrent!(target))
+        throw new AppError('COMPACT_TARGET_CHANGED', 'Native Compact対象が変わりました。再確認してください。');
+      assertSelection();
+      assertNoRun();
+      const intent: CompactMaintenanceIntent = {
+        schemaVersion: 1, intentId: randomBytes(32).toString('hex'), sessionId, agentId: target.agentId,
+        applicationId: identity.applicationId, botId: identity.botId,
+        ownerId: actor.userId, guildId: actor.guildId, channelId: actor.channelId,
+        bindingMode: this.sharedDiscordBindings && actor.guildId !== 'telegram' ? 'shared' : 'actor', bindingId: this.key(actor), bindingVersion,
+        workspaceDigest: createHash('sha256').update(cwd).digest('hex'), definitionId: '@deepseek-ai/dsh-command-compact',
+        state: 'unknown', dispatchedAt: Date.now()
+      };
+      this.store.reserveCompactIntent(intent);
+      const unknownOutcome = (commandId?: string): CompactMaintenanceIntent => {
+        if (commandId && commandId.length <= 128 && !/[\u0000-\u001f\u007f]/u.test(commandId)) {
+          try { this.store.recordCompactOutcome(intent.intentId, { state: 'unknown', commandId }); } catch { /* The original durable unknown intent remains authoritative. */ }
+        }
+        let current: CompactMaintenanceIntent;
+        try { current = this.store.compactIntent(intent.intentId) ?? intent; } catch { current = intent; }
+        assertSelection();
+        return current;
+      };
+      let execution: CompactExecution | undefined;
+      try { execution = await this.adapter.executeCompact!(target, new AbortController().signal); }
+      catch { return unknownOutcome(); }
+      if (!execution || typeof execution.commandId !== 'string' || !execution.commandId.length || execution.commandId.length > 128
+        || /[\u0000-\u001f\u007f]/u.test(execution.commandId) || !execution.result || typeof execution.result !== 'object') return unknownOutcome();
+      const commandId = execution.commandId;
+      const result = execution.result;
+      let state: CompactMaintenanceState;
+      let sourceEventSeq: number | undefined;
+      if (result.kind === 'success') {
+        if (result.text !== undefined && typeof result.text !== 'string') return unknownOutcome(commandId);
+        if (result.sourceEventSeq !== undefined) {
+          if (!Number.isSafeInteger(result.sourceEventSeq) || result.sourceEventSeq < 0 || Object.is(result.sourceEventSeq, -0)) return unknownOutcome(commandId);
+          state = 'completed'; sourceEventSeq = result.sourceEventSeq;
+        } else if (result.text === 'No compactable history yet.') state = 'noop';
+        else return unknownOutcome(commandId);
+      } else if (result.kind === 'error' && typeof result.text === 'string' && result.text.length > 0) return unknownOutcome(commandId);
+      else return unknownOutcome(commandId);
+      let settled: CompactMaintenanceIntent;
+      try {
+        settled = this.store.recordCompactOutcome(intent.intentId, {
+          state, commandId, ...(sourceEventSeq === undefined ? {} : { sourceEventSeq }), outcomeAt: Math.max(Date.now(), intent.dispatchedAt)
+        });
+      } catch { return unknownOutcome(commandId); }
+      assertSelection();
+      return settled;
+    });
+  }
   async create(actor: Actor, workspace: string): Promise<string> {
     this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
     const cwd = this.policy.workspace(workspace, actor.guildId); await this.policy.requireCwd(cwd, actor.guildId);

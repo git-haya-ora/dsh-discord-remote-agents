@@ -90,14 +90,24 @@ async function setup(t: { after: (fn: () => unknown) => void }) {
   return { dir, config, store, adapter, engine };
 }
 
-test('command schema stays within Discord option limits and registers only verified catalog/title writes', () => {
-  const schema = command.toJSON() as unknown as { options: Array<{ name: string; type: number; options?: Array<{ name: string; type: number; options?: unknown[] }> }> };
-  assert.equal(schema.options.length, 18);
+test('command schema stays within Discord option limits and registers only verified operations', () => {
+  type CommandOption = { name: string; type: number; required?: boolean; options?: CommandOption[] };
+  const schema = command.toJSON() as unknown as { options: CommandOption[] };
+  assert.equal(schema.options.length, 20);
   assert.ok(schema.options.length <= 25);
   const names = new Set(schema.options.map(option => option.name));
   assert.equal(names.has('models'), true);
   assert.equal(names.has('settings'), true);
-  for (const forbidden of ['history', 'model', 'reasoning', 'context', 'stop', 'approval', 'queue', 'files']) assert.equal(names.has(forbidden), false);
+  assert.equal(names.has('compact'), true);
+  const compact = schema.options.find(option => option.name === 'compact');
+  assert.equal(compact?.type, 1);
+  assert.equal(compact?.options?.find(option => option.name === 'confirm')?.required, true);
+  const context = schema.options.find(option => option.name === 'context');
+  assert.equal(context?.type, 2);
+  const contextCompact = context?.options?.find(option => option.name === 'compact');
+  assert.equal(contextCompact?.type, 1);
+  assert.equal(contextCompact?.options?.find(option => option.name === 'confirm')?.required, true);
+  for (const forbidden of ['history', 'model', 'reasoning', 'stop', 'approval', 'queue', 'files']) assert.equal(names.has(forbidden), false);
   for (const root of schema.options) {
     assert.ok((root.options?.length ?? 0) <= 25, `${root.name} options exceed limit`);
     for (const child of root.options ?? []) assert.ok((child.options?.length ?? 0) <= 25, `${root.name}.${child.name} options exceed limit`);
@@ -194,7 +204,8 @@ test('unsupported model writes/settings reset/stop operations fail with zero Nat
   assert.match(help.content, /read-only catalog/u);
   adapter.history = async () => { adapter.historyCalls++; return []; };
   const diagnose = await handleAgentCommand(interaction('diagnose'), engine, config, true);
-  assert.match(diagnose.content, /History: unavailable（Native pageにevent\/field filterなし）/u);
+  assert.match(diagnose.content, /History: unavailable（Native sessionQuery\.filterEvents is available, but role\/output and bounded materialization are not safely implemented）/u);
+  assert.match(diagnose.content, /Native Compact command: unavailable/u);
   assert.match(diagnose.content, /model catalog: unavailable/u);
   assert.match(diagnose.content, /Session title rename: unavailable/u);
   assert.match(diagnose.content, /model\/reasoning選択はHost既定も変える可能性があり未対応/u);

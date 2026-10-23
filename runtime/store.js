@@ -28,6 +28,27 @@ function outputScopeKey(context) {
     const { itemKind: _kind, itemIndex: _index, itemCount: _count, itemDigest: _digest, ...scope } = context;
     return JSON.stringify(scope);
 }
+function validCompactIntent(intent) {
+    const text = (value, max = 256) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
+    if (!intent || intent.schemaVersion !== 1 || !/^[a-f0-9]{64}$/u.test(intent.intentId) || !text(intent.sessionId) || !text(intent.agentId)
+        || !text(intent.applicationId, 64) || !text(intent.botId, 64) || !text(intent.ownerId, 128) || !text(intent.guildId, 128) || !text(intent.channelId, 128)
+        || !['actor', 'shared'].includes(intent.bindingMode) || !text(intent.bindingId, 512)
+        || intent.bindingId !== bindingKey(intent.guildId, intent.channelId, intent.bindingMode === 'shared' ? 'shared' : intent.ownerId)
+        || !Number.isSafeInteger(intent.bindingVersion) || intent.bindingVersion < 0 || !/^[a-f0-9]{64}$/u.test(intent.workspaceDigest)
+        || intent.definitionId !== '@deepseek-ai/dsh-command-compact' || !['unknown', 'completed', 'noop'].includes(intent.state)
+        || !Number.isSafeInteger(intent.dispatchedAt) || intent.dispatchedAt < 0)
+        return false;
+    const commandIdValid = intent.commandId === undefined || text(intent.commandId, 128);
+    const outcomeValid = intent.outcomeAt === undefined || Number.isSafeInteger(intent.outcomeAt) && intent.outcomeAt >= intent.dispatchedAt;
+    const sequenceValid = intent.sourceEventSeq === undefined || Number.isSafeInteger(intent.sourceEventSeq) && intent.sourceEventSeq >= 0 && !Object.is(intent.sourceEventSeq, -0);
+    if (!commandIdValid || !outcomeValid || !sequenceValid)
+        return false;
+    if (intent.state === 'completed')
+        return text(intent.commandId, 128) && Number.isSafeInteger(intent.sourceEventSeq) && intent.sourceEventSeq >= 0 && !Object.is(intent.sourceEventSeq, -0) && Number.isSafeInteger(intent.outcomeAt);
+    if (intent.state === 'noop')
+        return text(intent.commandId, 128) && intent.sourceEventSeq === undefined && Number.isSafeInteger(intent.outcomeAt);
+    return intent.sourceEventSeq === undefined;
+}
 export class Store {
     metadataOnly;
     db;
@@ -74,6 +95,9 @@ export class Store {
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, state TEXT NOT NULL, user_id TEXT NOT NULL, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS protected_output_intents (intent_id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL, payload TEXT NOT NULL, reserved_cipher_bytes INTEGER NOT NULL, reserved_metadata_bytes INTEGER NOT NULL, updated_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS protected_output_state ON protected_output_intents(state);
+         CREATE TABLE IF NOT EXISTS compact_intents (intent_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, dispatched_at INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS compact_intents_session ON compact_intents(session_id,dispatched_at);
+         CREATE UNIQUE INDEX IF NOT EXISTS one_unknown_compact_per_session ON compact_intents(session_id) WHERE state='unknown';
         CREATE UNIQUE INDEX IF NOT EXISTS one_active_run ON runs(session_id) WHERE state IN ('dispatching','accepted','running','unknown');
         PRAGMA user_version=1;`);
         }
@@ -733,6 +757,83 @@ export class Store {
             if (error instanceof AppError)
                 throw error;
             throw new AppError('PROTECTED_OUTPUT_COMMIT_FAILED', '保護出力の削除記録を確定できません。');
+        }
+    }
+    readCompactIntent(row) {
+        if (!row)
+            return undefined;
+        try {
+            const intent = JSON.parse(String(row.payload));
+            if (!validCompactIntent(intent) || intent.intentId !== row.intent_id || intent.sessionId !== row.session_id || intent.state !== row.state
+                || intent.dispatchedAt !== row.dispatched_at)
+                throw new Error('Compact intent mismatch');
+            return intent;
+        }
+        catch {
+            throw new AppError('DB_CORRUPT', 'Compact intentを確認できません。');
+        }
+    }
+    compactIntent(intentId) {
+        return this.readCompactIntent(this.db.prepare('SELECT intent_id,session_id,state,payload,dispatched_at FROM compact_intents WHERE intent_id=?').get(intentId));
+    }
+    latestCompactIntent(sessionId) {
+        return this.readCompactIntent(this.db.prepare('SELECT intent_id,session_id,state,payload,dispatched_at FROM compact_intents WHERE session_id=? ORDER BY dispatched_at DESC,rowid DESC LIMIT 1').get(sessionId));
+    }
+    compactIntents() {
+        return this.db.prepare('SELECT intent_id,session_id,state,payload,dispatched_at FROM compact_intents ORDER BY rowid').all().map(row => this.readCompactIntent(row));
+    }
+    reserveCompactIntent(intent) {
+        if (!validCompactIntent(intent) || intent.state !== 'unknown' || intent.commandId !== undefined || intent.sourceEventSeq !== undefined || intent.outcomeAt !== undefined)
+            throw new AppError('COMPACT_INTENT_INVALID', 'Compactの未知Intentが不正です。');
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+            const currentBinding = this.binding(intent.bindingId);
+            const currentVersion = this.bindingVersion(intent.bindingId);
+            if (currentBinding !== intent.sessionId || currentVersion !== intent.bindingVersion)
+                throw new AppError('BINDING_CONFLICT', 'Bindingが変更されました。Compactは実行していません。');
+            const active = this.db.prepare("SELECT state FROM runs WHERE session_id=? AND state IN ('dispatching','accepted','running','unknown') LIMIT 1").get(intent.sessionId)?.state;
+            if (active === 'unknown')
+                throw new AppError('SESSION_STATE_UNKNOWN', '未確認RunがあるためCompactできません。');
+            if (active)
+                throw new AppError('SESSION_BUSY', 'Runが進行中のためCompactできません。');
+            if (this.db.prepare("SELECT 1 FROM compact_intents WHERE session_id=? AND state='unknown' LIMIT 1").get(intent.sessionId))
+                throw new AppError('COMPACT_UNKNOWN', 'Compactの結果が未確認です。PCで履歴を確認してください。');
+            if (this.db.prepare('INSERT OR IGNORE INTO compact_intents(intent_id,session_id,state,payload,dispatched_at) VALUES (?,?,?,?,?)').run(intent.intentId, intent.sessionId, intent.state, JSON.stringify(intent), intent.dispatchedAt).changes !== 1)
+                throw new AppError('COMPACT_INTENT_CONFLICT', 'CompactのIntentを一意に保存できません。');
+            this.db.exec('COMMIT');
+        }
+        catch (error) {
+            try {
+                this.db.exec('ROLLBACK');
+            }
+            catch { }
+            throw error;
+        }
+    }
+    recordCompactOutcome(intentId, outcome) {
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+            const current = this.compactIntent(intentId);
+            if (!current || current.state !== 'unknown')
+                throw new AppError('COMPACT_INTENT_CONFLICT', 'Compact Intentが未知状態ではありません。');
+            const next = { ...current, ...outcome };
+            if (!validCompactIntent(next))
+                throw new AppError('COMPACT_INTENT_INVALID', 'Compactの結果が不正です。');
+            if (next.state === 'unknown' && next.commandId === current.commandId && next.outcomeAt === current.outcomeAt) {
+                this.db.exec('COMMIT');
+                return next;
+            }
+            if (this.db.prepare('UPDATE compact_intents SET state=?,payload=? WHERE intent_id=? AND state=\'unknown\'').run(next.state, JSON.stringify(next), intentId).changes !== 1)
+                throw new AppError('COMPACT_INTENT_CONFLICT', 'Compactの結果が同時に更新されました。');
+            this.db.exec('COMMIT');
+            return next;
+        }
+        catch (error) {
+            try {
+                this.db.exec('ROLLBACK');
+            }
+            catch { }
+            throw error;
         }
     }
     evictBody(runId) { this.bodies.delete(runId); }
