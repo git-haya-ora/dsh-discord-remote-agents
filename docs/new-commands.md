@@ -4,14 +4,14 @@ This chapter implements the server-only command-verification slice of specificat
 
 ## Registered surface
 
-The `/agent` root currently has 18 children; each subcommand has at most 3 options, and the existing notification group has 3 subcommands. The schema remains below Discord's 25-option limit at every hierarchy level.
+The `/agent` root currently has 20 children, counting the 17 subcommands and 3 subcommand groups; each subcommand has at most 3 options, and the existing notification group has 3 subcommands. The schema remains below Discord's 25-option limit at every hierarchy level.
 
 | Command | Behavior and limits |
 | --- | --- |
 | `/agent help [topic]` | Lists implemented features and explains unsupported contract-dependent operations. |
 | `/agent current` | Shows the selected, authorized Session; safe title, configured Workspace alias when it matches, observed busy state, Binding version, last-request model versus next model setting when Native metadata is present, and notification preferences. This is not a claim about the model of a currently active request. |
 | `/agent models [provider] [query] [page]` | Read-only view of the injected Native `modelCatalog()` when available. Displays routable provider/model/reasoning candidates with bounded output; failure details are omitted. This does not select a model. |
-| `/agent compact confirm:true` / `/agent context compact confirm:true` | Explicitly runs the canonical Native Compact command for the selected, authorized ordinary Agent after idle/queue and target revalidation. It may change Session history; unknown outcomes are durable and never automatically replayed. This is not a context-usage meter, and real Native/Discord acceptance remains unverified. |
+| `/agent compact confirm:true` / `/agent context compact confirm:true` | Explicitly runs the canonical Native Compact command for the selected, authorized ordinary Agent after idle/queue and target revalidation. It may change Session history; unknown outcomes are durable and never automatically replayed. An unresolved outcome fences only that exact full Session from further prompts, binding to it, and title mutation; this Bridge path has no clear/replay action. This is not a context-usage meter, and real Native/Discord acceptance remains unverified. |
 | `/agent settings title value:<title> confirm-no-cas:true` | Renames only the currently selected, authorized idle Session through the injected Native `rename()` method, rechecks Binding and reads back the normalized title. The explicit flag acknowledges that the Native endpoint has no title CAS; external Desktop races cannot be prevented. `/agent rename` is a compatibility alias. |
 | `/agent workspaces` | Lists configured aliases only; never returns local paths. |
 | `/agent workspace-add alias:<new> path:<absolute> confirm-access:true` | Allows an existing directory after connection. Requires configured user/Guild/Channel and explicit access confirmation. Adds at most 32 aliases, never overwrites an alias or selects/creates a Session. Persists before granting runtime access; revision conflicts fail closed. Changes neither credentials nor existing Runs. Paths are submitted to Discord as arguments, never echoed by the response; do not include secrets. |

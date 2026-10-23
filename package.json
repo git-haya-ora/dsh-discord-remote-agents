@@ -7,7 +7,7 @@
     "pack:plugin": "npm run build && npm pack --ignore-scripts",
     "verify:source": "node tools/verify-public-source.mjs"
   },
-  "devDependencies": { "@types/node": "22.19.15", "typescript": "5.9.3" },
+  "devDependencies": { "@deepseek-ai/cordis": "4.0.4", "@types/node": "22.19.15", "typescript": "5.9.3" },
   "description": "Single-operator Discord text bridge for DSH; approvals, cancellation, attachments, artifacts, and atomic desktop coordination are unavailable",
   "private": true,
   "license": "UNLICENSED",

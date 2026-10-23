@@ -93,7 +93,7 @@ function compactFixture(options: {
     return { agent };
   };
   const adapter = new NativeSessionAdapter(controller, undefined, undefined, commands, agents);
-  return { adapter, calls, agent, setRegistryAgent: (value: unknown) => { registryAgent = value; } };
+  return { adapter, calls, agent, commands, agents, setRegistryAgent: (value: unknown) => { registryAgent = value; } };
 }
 
 test('Compact resolves the exact ordinary Agent and invokes only the canonical Native command', async () => {
@@ -133,4 +133,20 @@ test('Compact rejects a target after the current registry Agent changes without 
   assert.equal(adapter.isCompactTargetCurrent(target), false);
   await assert.rejects(adapter.executeCompact(target, new AbortController().signal), { code: 'COMPACT_TARGET_CHANGED' });
   assert.equal(calls.some(call => call.method === 'commands.execute'), false);
+});
+
+test('Compact target generation rejects withdrawal/reprovide of identical services and permits a fresh target', async () => {
+  const { adapter, calls, commands, agents } = compactFixture();
+  const beforeWithdraw = await adapter.prepareCompactTarget('native-session', '/synthetic/project');
+  assert.equal(adapter.isCompactTargetCurrent(beforeWithdraw), true);
+  assert.equal(adapter.attachCompactServices(undefined, undefined), false);
+  assert.equal(adapter.attachCompactServices(commands, agents), true);
+  assert.equal(adapter.isCompactTargetCurrent(beforeWithdraw), false);
+  await assert.rejects(adapter.executeCompact(beforeWithdraw, new AbortController().signal), { code: 'COMPACT_TARGET_CHANGED' });
+  assert.equal(calls.some(call => call.method === 'commands.execute'), false);
+
+  const afterReprovide = await adapter.prepareCompactTarget('native-session', '/synthetic/project');
+  assert.equal(adapter.isCompactTargetCurrent(afterReprovide), true);
+  await adapter.executeCompact(afterReprovide, new AbortController().signal);
+  assert.equal(calls.filter(call => call.method === 'commands.execute').length, 1);
 });

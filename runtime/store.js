@@ -157,6 +157,7 @@ export class Store {
                 throw new AppError('BINDING_VERSION_EXHAUSTED', 'Binding version上限です。記録を保全してください。');
             if (expectedVersion !== undefined && version !== expectedVersion)
                 throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+            this.assertNoUnknownCompactIntent(sessionId);
             if (unique && this.db.prepare('SELECT key FROM bindings WHERE session_id=? AND key<>? LIMIT 1').get(sessionId, key))
                 throw new AppError('SESSION_BOUND', 'このSessionは別の会話で選択されています。先に明示解除してください。');
             this.db.prepare('INSERT INTO bindings(key,session_id) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET session_id=excluded.session_id').run(key, sessionId);
@@ -213,10 +214,19 @@ export class Store {
         }
     }
     create(run) {
+        this.db.exec('BEGIN IMMEDIATE');
         try {
+            this.assertNoUnknownCompactIntent(run.sessionId);
             this.db.prepare('INSERT INTO runs(id,session_id,state,user_id,payload) VALUES (?,?,?,?,?)').run(run.id, run.sessionId, run.state, run.userId, this.encode(run));
+            this.db.exec('COMMIT');
         }
-        catch {
+        catch (error) {
+            try {
+                this.db.exec('ROLLBACK');
+            }
+            catch { }
+            if (error instanceof AppError && ['COMPACT_UNKNOWN', 'DB_CORRUPT'].includes(error.code))
+                throw error;
             throw new AppError('RUN_BUSY', '同じセッションに未確定の実行があります。/agent statusで確認してください。');
         }
     }
@@ -779,6 +789,13 @@ export class Store {
     latestCompactIntent(sessionId) {
         return this.readCompactIntent(this.db.prepare('SELECT intent_id,session_id,state,payload,dispatched_at FROM compact_intents WHERE session_id=? ORDER BY dispatched_at DESC,rowid DESC LIMIT 1').get(sessionId));
     }
+    assertNoUnknownCompactIntent(sessionId) {
+        const row = this.db.prepare("SELECT intent_id,session_id,state,payload,dispatched_at FROM compact_intents WHERE session_id=? AND state='unknown' LIMIT 1").get(sessionId);
+        if (!row)
+            return;
+        this.readCompactIntent(row);
+        throw new AppError('COMPACT_UNKNOWN', 'Compactの結果が未確認です。PCで履歴を確認してください。');
+    }
     compactIntents() {
         return this.db.prepare('SELECT intent_id,session_id,state,payload,dispatched_at FROM compact_intents ORDER BY rowid').all().map(row => this.readCompactIntent(row));
     }
@@ -796,8 +813,7 @@ export class Store {
                 throw new AppError('SESSION_STATE_UNKNOWN', '未確認RunがあるためCompactできません。');
             if (active)
                 throw new AppError('SESSION_BUSY', 'Runが進行中のためCompactできません。');
-            if (this.db.prepare("SELECT 1 FROM compact_intents WHERE session_id=? AND state='unknown' LIMIT 1").get(intent.sessionId))
-                throw new AppError('COMPACT_UNKNOWN', 'Compactの結果が未確認です。PCで履歴を確認してください。');
+            this.assertNoUnknownCompactIntent(intent.sessionId);
             if (this.db.prepare('INSERT OR IGNORE INTO compact_intents(intent_id,session_id,state,payload,dispatched_at) VALUES (?,?,?,?,?)').run(intent.intentId, intent.sessionId, intent.state, JSON.stringify(intent), intent.dispatchedAt).changes !== 1)
                 throw new AppError('COMPACT_INTENT_CONFLICT', 'CompactのIntentを一意に保存できません。');
             this.db.exec('COMMIT');

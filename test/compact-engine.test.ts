@@ -21,10 +21,12 @@ class CompactFixtureAdapter implements AgentAdapter {
   inbox: { 'next-turn': unknown[]; 'next-step': unknown[] } = { 'next-turn': [], 'next-step': [] };
   cursorSequence: number[] = [];
   targetCurrentSequence: boolean[] = [];
+  readonly visibleSessions = new Set([sessionId]);
   onPrepare?: () => void;
+  lastExecutionSignal?: AbortSignal;
   constructor(readonly cwd: string, readonly mode: FixtureMode, readonly rawNativeText: string) {}
   async list(): Promise<SessionInfo[]> {
-    return [{ sessionId, cwd: this.cwd, running: this.running, title: 'synthetic session', subagent: false, updatedAt: 1 }];
+    return [...this.visibleSessions].map(id => ({ sessionId: id, cwd: this.cwd, running: this.running, title: 'synthetic session', subagent: false, updatedAt: 1 }));
   }
   async create(): Promise<string> { throw new Error('not used'); }
   async snapshot(): Promise<Snapshot> {
@@ -40,8 +42,8 @@ class CompactFixtureAdapter implements AgentAdapter {
   isCompactTargetCurrent(): boolean {
     const current = this.targetCurrentSequence[this.targetChecks] ?? true; this.targetChecks++; return current;
   }
-  async executeCompact(): Promise<CompactExecution | undefined> {
-    this.executions++;
+  async executeCompact(_target: CompactTarget, signal: AbortSignal): Promise<CompactExecution | undefined> {
+    this.executions++; this.lastExecutionSignal = signal;
     if (this.mode === 'throw') throw new Error(this.rawNativeText);
     if (this.mode === 'native-error') return { commandId: 'native-command-synthetic', result: { kind: 'error', text: this.rawNativeText } };
     if (this.mode === 'malformed') return { commandId: 'native-command-synthetic', result: { kind: 'unexpected', text: this.rawNativeText } } as unknown as CompactExecution;
@@ -51,7 +53,7 @@ class CompactFixtureAdapter implements AgentAdapter {
   }
 }
 
-async function setup(t: { after(fn: () => unknown): void }, mode: FixtureMode) {
+async function setup(t: { after(fn: () => unknown): void }, mode: FixtureMode, compactSignal?: () => AbortSignal) {
   const dir = await mkdtemp(join(tmpdir(), 'compact-engine-test-'));
   const config: Config = {
     token: 'synthetic.fixture.NOT-A-REAL-TOKEN', applicationId, guildId: actor.guildId,
@@ -64,7 +66,7 @@ async function setup(t: { after(fn: () => unknown): void }, mode: FixtureMode) {
   let store = new Store(databasePath, true);
   store.setSetting('restricted-storage-profile', 'single-operator-text-v1');
   const adapter = new CompactFixtureAdapter(dir, mode, `RAW_NATIVE_${mode}_DO_NOT_EXPOSE`);
-  const newEngine = () => new Engine(adapter, store, policy, [], false, undefined, { applicationId, botId });
+  const newEngine = () => new Engine(adapter, store, policy, [], false, undefined, { applicationId, botId }, false, compactSignal);
   let engine = newEngine();
   await engine.bind(actor, sessionId);
   t.after(async () => { try { store.close(); } catch {} await rm(dir, { recursive: true, force: true }); });
@@ -102,6 +104,29 @@ for (const mode of ['native-error', 'throw', 'malformed'] as const) {
     assert.equal(fixture.store().binding(bindingKey(actor.guildId, actor.channelId, actor.userId)), sessionId);
   });
 }
+
+test('durable unknown Compact fences the exact Session across restart and other Bindings only', async t => {
+  const fixture = await setup(t, 'native-error');
+  const unknown = await fixture.engine().compact(actor, true);
+  assert.equal(unknown.state, 'unknown');
+  fixture.reopen();
+  await assert.rejects(fixture.engine().submit(actor, 'after-compact-restart', 'synthetic prompt'), { code: 'COMPACT_UNKNOWN' });
+  assert.equal(fixture.adapter.promptCalls, 0);
+
+  const otherActor: Actor = { ...actor, channelId: '666666666666666666' };
+  fixture.config.allowedChannelIds.add(otherActor.channelId);
+  await assert.rejects(fixture.engine().bind(otherActor, sessionId), { code: 'COMPACT_UNKNOWN' });
+  assert.equal(fixture.store().binding(bindingKey(otherActor.guildId, otherActor.channelId, otherActor.userId)), undefined);
+
+  const cleanSessionId = 'native-session-clean-synthetic';
+  fixture.adapter.visibleSessions.add(cleanSessionId);
+  await fixture.engine().bind(otherActor, cleanSessionId);
+  const accepted = await fixture.engine().submit(otherActor, 'unrelated-session-run', 'synthetic prompt');
+  assert.equal(accepted.state, 'accepted');
+  assert.equal(fixture.adapter.promptCalls, 1);
+  assert.equal(fixture.adapter.executions, 1);
+  assert.equal(fixture.store().latestCompactIntent(sessionId)?.state, 'unknown');
+});
 
 test('compact rejects missing confirmation and unauthorized actors before target preparation', async t => {
   const fixture = await setup(t, 'success-zero');
@@ -154,6 +179,22 @@ test('compact stops when Binding changes or actor authorization is revoked durin
   await assert.rejects(authFixture.engine().compact(actor, true), { code: 'NOT_AUTHORIZED' });
   assert.equal(authFixture.adapter.executions, 0);
   assert.equal(authFixture.store().latestCompactIntent(sessionId), undefined);
+});
+
+test('Compact lifecycle restart abandons the old signal before reserve and uses the fresh signal', async t => {
+  let lifecycle = new AbortController();
+  const fixture = await setup(t, 'success-zero', () => lifecycle.signal);
+  fixture.adapter.onPrepare = () => lifecycle.abort();
+  await assert.rejects(fixture.engine().compact(actor, true), { code: 'COMPACT_UNAVAILABLE' });
+  assert.equal(fixture.adapter.executions, 0);
+  assert.equal(fixture.store().latestCompactIntent(sessionId), undefined);
+
+  delete fixture.adapter.onPrepare;
+  lifecycle = new AbortController();
+  const completed = await fixture.engine().compact(actor, true);
+  assert.equal(completed.state, 'completed');
+  assert.strictEqual(fixture.adapter.lastExecutionSignal, lifecycle.signal);
+  assert.equal(lifecycle.signal.aborted, false);
 });
 
 test('compact accepts sourceEventSeq zero, records canonical no-op, and rejects negative zero', async t => {

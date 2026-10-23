@@ -8,7 +8,7 @@
 - 制限版のDiscord slash操作、許可scope、会話共有Binding、既存Native Session選択・テキスト実行・状態・結果参照。RunのSession・操作者・通知先を固定し、不明な受付や通知を自動再送しません。確認済みの同一turn/step/requestId付きNative user append後にだけ「作業中」を固定先へ通知します。
 - `/agent models` のread-only catalogと、明示的な no-CAS 承認・再認可・readbackを伴う選択中Sessionのタイトル変更。`/agent current` は直近の要求modelと次回設定を区別し、実行中modelとは断定しません。model/reasoning mutationは共有Host既定への書込みがあるため無効です。
 - 各partの状態・receipt・digest、Binding/Run CAS、将来Runだけに適用する通知設定。自動全文通知の上限と手動参照の違いは[全文配送](<full-output.md>)を参照。
-- `/agent compact confirm:true` と `/agent context compact confirm:true` は、確認済みNative commandで選択中の許可Agentを圧縮します。idle/queue/対象を再確認し、結果不明はdurable `unknown`として自動再送しません。Engine/Host/adapter-contractのsynthetic testsは実Native／Discord受け入れを証明しません。
+- `/agent compact confirm:true` と `/agent context compact confirm:true` は、確認済みNative commandで選択中の許可Agentを圧縮します。idle/queue/対象を再確認し、結果不明はdurable `unknown`として自動再送しません。未解決の結果は完全一致するSessionだけを新規prompt・bind先・title変更からfail closedにし、このBridgeに解除操作はありません。Engine/Host/adapter-contractのsynthetic testsは実Native／Discord受け入れを証明しません。
 - Windows CurrentUser DPAPIによる秘密保護、private-path検査、metadata専用SQLiteに加え、終端Runのredacted本文／partをBridge専用DPAPI profileへdurable保存するOUT-08部分実装。prepared intent、random opaque refs、容量quota、readback＋固定scope確認、Run/manifestのatomic SQL publish、送達確定後7日のexact-ref cleanupを実装。unknown/未送信は保持し、SQLiteに本文を平文保存しません。
 - 既存Telegramコードと回帰試験を維持しますが、追加開発・実機互換の保証は行いません。
 

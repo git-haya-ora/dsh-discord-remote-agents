@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
 import type { Engine } from '../src/engine.js';
+import type { CompactTarget } from '../src/types.js';
 const { DiscordHost, validateBot } = await import(new URL('../../packages/discord-plugin/host-runtime.js', import.meta.url).href) as typeof import('../packages/discord-plugin/host-runtime.js');
 const { apply: applyDiscordPlugin, inject: requiredDiscordServices } = await import(new URL('../../packages/discord-plugin/index.js', import.meta.url).href) as { apply(ctx: unknown, config?: unknown): void; inject: string[] };
+const { Context } = await import('@deepseek-ai/cordis');
 const guildId = '222222222222222222', applicationId = '444444444444444444';
 const syntheticToken = 'synthetic.fixture.NOT-A-REAL-TOKEN';
 async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => Promise<void>, noticeFailure = false, noticeGate?: Promise<{ sent: number; failed: number }>) {
@@ -45,34 +47,90 @@ test('Native Compact services are optional; their absence preserves base Host st
   assert.equal(f.counts().receiverCreates, 1);
 });
 
-test('Discord plugin keeps commands optional and forwards presence/withdrawal through Host injection', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'compact-plugin-wiring-synthetic-'));
-  t.after(async () => { await rm(root, { recursive: true, force: true }); });
-  let injectNames: string[] | undefined;
-  let receiveCommands: ((commands?: unknown) => boolean) | undefined;
-  const effects: Array<() => unknown> = [];
-  const ctx: {
-    connection: { fetch: { register(): () => void } };
-    sessionController: { list(): Promise<void>; create(): Promise<void>; projections(): Promise<void>; page(): Promise<void>; prompt(): Promise<void> };
-    agents: { get(): void } | undefined;
-    inject(names: string[], callback: (commands?: unknown) => boolean): void;
-    effect(callback: () => unknown): void;
-  } = {
-    connection: { fetch: { register() { return () => {}; } } },
-    sessionController: { async list() {}, async create() {}, async projections() {}, async page() {}, async prompt() {} },
-    agents: { get() {} },
-    inject(names, callback) { injectNames = names; receiveCommands = callback; },
-    effect(callback) { effects.push(callback); }
+test('Host stop/restart invalidates old Compact targets and exposes a fresh current target', async t => {
+  const f = await setup(t);
+  const host = f.host as typeof f.host & {
+    attachCompactServices(commands: unknown, agents: unknown): boolean;
+    compactAbort: AbortController;
+    adapter: { prepareCompactTarget(sessionId: string, cwd: string): Promise<CompactTarget>; isCompactTargetCurrent(target: CompactTarget): boolean };
   };
-  applyDiscordPlugin(ctx, { dataRoot: root });
-  assert.deepEqual(requiredDiscordServices, ['connection', 'sessionController']);
-  assert.deepEqual(injectNames, ['commands']);
-  assert.equal(effects.length, 2);
-  assert.equal(receiveCommands!(undefined), false);
-  const commands = { find() {}, execute() {} };
-  assert.equal(receiveCommands!(commands), true);
-  ctx.agents = undefined;
-  assert.equal(receiveCommands!(undefined), false);
+  const sessionId = 'native-session-host-lifecycle-synthetic';
+  const agent = { id: sessionId, session: { header: { id: sessionId, cwd: f.settings.workspaces.fixture } } };
+  Object.assign(f.ctx.sessionController, { resolveAgent: async () => ({ agent }) });
+  const commands = { find() { return { definitionId: '@deepseek-ai/dsh-command-compact' }; }, execute() { return {}; } };
+  const agents = { get(id: string) { return id === sessionId ? agent : undefined; } };
+  assert.equal(host.attachCompactServices(commands, agents), true);
+  assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings: f.settings, token: syntheticToken })).ok, true);
+  assert.equal((await f.host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true })).ok, true);
+
+  const adapter = host.adapter;
+  const beforeStop = await adapter.prepareCompactTarget(sessionId, f.settings.workspaces.fixture);
+  const firstSignal = host.compactAbort.signal;
+  assert.equal(adapter.isCompactTargetCurrent(beforeStop), true);
+  assert.equal((await f.host.dispatch({ operation: 'stop', expectedRevision: 1 })).ok, true);
+  assert.equal(firstSignal.aborted, true);
+  assert.equal(adapter.isCompactTargetCurrent(beforeStop), false);
+
+  const stoppedSignal = host.compactAbort.signal;
+  assert.equal(stoppedSignal.aborted, false);
+  assert.equal((await f.host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true })).ok, true);
+  const restartedSignal = host.compactAbort.signal;
+  assert.notStrictEqual(restartedSignal, stoppedSignal);
+  assert.equal(restartedSignal.aborted, false);
+  const afterRestart = await adapter.prepareCompactTarget(sessionId, f.settings.workspaces.fixture);
+  assert.equal(adapter.isCompactTargetCurrent(beforeStop), false);
+  assert.equal(adapter.isCompactTargetCurrent(afterRestart), true);
+
+  await f.host.dispose();
+  assert.equal(restartedSignal.aborted, true);
+  assert.equal(adapter.isCompactTargetCurrent(afterRestart), false);
+});
+
+test('Cordis optional services attach, withdraw, reprovide, and dispose through the actual Host child fiber', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'compact-cordis-wiring-synthetic-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const context = new Context();
+  const connection = { fetch: { register() { return () => {}; } } };
+  const sessionController = { async list() {}, async create() {}, async projections() {}, async page() {}, async prompt() {} };
+  const commands = { find() {}, execute() {} }, agents = { get() {} };
+  const disposers: Array<() => void | Promise<void>> = [
+    await context.provide('connection', connection), await context.provide('sessionController', sessionController),
+    await context.provide('commands', commands), await context.provide('agents', agents)
+  ];
+  const attachCalls: Array<[unknown, unknown]> = [];
+  const hostPrototype = DiscordHost.prototype as typeof DiscordHost.prototype & {
+    attachCompactServices(commands: unknown, agents: unknown): boolean;
+  };
+  const originalAttach = hostPrototype.attachCompactServices;
+  const originalBoot = DiscordHost.prototype.boot;
+  hostPrototype.attachCompactServices = function (nextCommands: unknown, nextAgents: unknown) {
+    attachCalls.push([nextCommands, nextAgents]);
+    return originalAttach.call(this, nextCommands, nextAgents);
+  };
+  DiscordHost.prototype.boot = async function () {};
+  let pluginFiber: Awaited<ReturnType<typeof context.plugin>> | undefined;
+  try {
+    pluginFiber = await context.plugin({ name: 'synthetic-discord-host', inject: requiredDiscordServices, apply: applyDiscordPlugin }, { dataRoot: root });
+    assert.equal(attachCalls.length, 1);
+    assert.strictEqual(attachCalls[0]![0], commands); assert.strictEqual(attachCalls[0]![1], agents);
+
+    await disposers[3]!();
+    assert.deepEqual(attachCalls.at(-1), [undefined, undefined]);
+    disposers[3] = await context.provide('agents', agents);
+    assert.strictEqual(attachCalls.at(-1)?.[0], commands); assert.strictEqual(attachCalls.at(-1)?.[1], agents);
+
+    await disposers[2]!();
+    assert.deepEqual(attachCalls.at(-1), [undefined, undefined]);
+    disposers[2] = await context.provide('commands', commands);
+    assert.strictEqual(attachCalls.at(-1)?.[0], commands); assert.strictEqual(attachCalls.at(-1)?.[1], agents);
+    assert.deepEqual(requiredDiscordServices, ['connection', 'sessionController']);
+  } finally {
+    if (pluginFiber) await pluginFiber.dispose();
+    for (const dispose of disposers.reverse()) await dispose();
+    hostPrototype.attachCompactServices = originalAttach;
+    DiscordHost.prototype.boot = originalBoot;
+  }
+  assert.deepEqual(attachCalls.at(-1), [undefined, undefined]);
 });
 
 test('slow notice delivery does not block connected management status', { timeout: 5000 }, async t => {

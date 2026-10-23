@@ -9,16 +9,19 @@ export class NativeSessionAdapter {
   constructor(controller, store, signal = new AbortController().signal, commands, agents) {
     if (!controller || methods.some(method => typeof controller[method] !== 'function')) throw new AppError('HOST_COMPATIBILITY_UNVERIFIED', '正式Native Session serviceが利用できません。');
     this.controller = controller; this.store = store; this.signal = signal; this.verifiedSessions = new Set();
-    this.compactTargets = new WeakMap(); this.attachCompactServices(commands, agents);
+    this.compactTargets = new WeakMap(); this.compactServiceGeneration = 0; this.attachCompactServices(commands, agents);
   }
+  invalidateCompactTargets() { this.compactServiceGeneration++; }
   attachCompactServices(commands, agents) {
+    this.invalidateCompactTargets();
     this.commands = commands && typeof commands.find === 'function' && typeof commands.execute === 'function' ? commands : undefined;
     this.agents = agents && typeof agents.get === 'function' ? agents : undefined;
     return !!(this.commands && this.agents && typeof this.controller.resolveAgent === 'function');
   }
   async prepareCompactTarget(sessionId, cwd) {
     const unavailable = () => new AppError('COMPACT_UNAVAILABLE', 'このHostでは正式なCompact commandを確認できません。PCで確認してください。');
-    if (!this.commands || !this.agents || typeof this.controller.resolveAgent !== 'function') throw unavailable();
+    const commands = this.commands, agents = this.agents, generation = this.compactServiceGeneration;
+    if (!commands || !agents || typeof this.controller.resolveAgent !== 'function') throw unavailable();
     this.signal.throwIfAborted();
     let resolved;
     try {
@@ -29,22 +32,24 @@ export class NativeSessionAdapter {
     } catch { throw unavailable(); }
     if (!resolved || resolved.error || !resolved.agent) throw unavailable();
     const agent = resolved.agent, session = agent.session, header = session?.header;
-    if (agent.id !== sessionId || !header || header.id !== sessionId || header.cwd !== cwd || header.origin === 'subagent' || header.parentSession != null
-      || this.agents.get(sessionId) !== agent) throw unavailable();
+    if (generation !== this.compactServiceGeneration || this.commands !== commands || this.agents !== agents
+      || agent.id !== sessionId || !header || header.id !== sessionId || header.cwd !== cwd || header.origin === 'subagent' || header.parentSession != null
+      || agents.get(sessionId) !== agent) throw unavailable();
     let definition;
-    try { definition = this.commands.find(agent, 'compact'); } catch { throw unavailable(); }
-    if (!definition || definition.definitionId !== '@deepseek-ai/dsh-command-compact') throw unavailable();
+    try { definition = commands.find(agent, 'compact'); } catch { throw unavailable(); }
+    if (generation !== this.compactServiceGeneration || this.commands !== commands || this.agents !== agents
+      || !definition || definition.definitionId !== '@deepseek-ai/dsh-command-compact') throw unavailable();
     const target = Object.freeze({ sessionId, agentId: agent.id, cwd, definitionId: '@deepseek-ai/dsh-command-compact' });
-    this.compactTargets.set(target, { agent, session });
+    this.compactTargets.set(target, { agent, session, commands, agents, generation });
     return target;
   }
   isCompactTargetCurrent(target) {
     const captured = target && typeof target === 'object' ? this.compactTargets.get(target) : undefined;
-    if (!captured || this.signal.aborted || !this.commands || !this.agents || this.agents.get(target.sessionId) !== captured.agent
-      || captured.agent.id !== target.sessionId || captured.agent.session !== captured.session || captured.session.header?.id !== target.sessionId
-      || captured.session.header?.cwd !== target.cwd || captured.session.header?.origin === 'subagent' || captured.session.header?.parentSession != null
-      || target.definitionId !== '@deepseek-ai/dsh-command-compact') return false;
-    try { return this.commands.find(captured.agent, 'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'; }
+    if (!captured || this.signal.aborted || captured.generation !== this.compactServiceGeneration || captured.commands !== this.commands || captured.agents !== this.agents
+      || this.agents?.get(target.sessionId) !== captured.agent || captured.agent.id !== target.sessionId || captured.agent.session !== captured.session
+      || captured.session.header?.id !== target.sessionId || captured.session.header?.cwd !== target.cwd || captured.session.header?.origin === 'subagent'
+      || captured.session.header?.parentSession != null || target.definitionId !== '@deepseek-ai/dsh-command-compact') return false;
+    try { return captured.commands.find(captured.agent, 'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'; }
     catch { return false; }
   }
   async executeCompact(target, signal) {

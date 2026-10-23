@@ -321,8 +321,15 @@ export async function handleAgentCommand(
       const renameSession = engine.adapter.rename?.bind(engine.adapter);
       if (!renameSession) throw new AppError('SESSION_RENAME_UNAVAILABLE', 'Native Session title updateは利用できません。');
       return engine.withSessionMutation(sessionId, async () => {
+        const assertRenameCurrent = (): void => {
+          engine.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+          if (engine.binding(actor) !== sessionId || engine.bindingVersion(actor) !== bindingVersion) throw new AppError('BINDING_CONFLICT', 'Session選択が変更されました。titleは変更していません。');
+          engine.store.assertNoUnknownCompactIntent(sessionId);
+        };
         const current = await revalidateCurrentSession(engine, actor, sessionId, bindingVersion);
+        assertRenameCurrent();
         const snapshot = await engine.adapter.snapshot(sessionId);
+        assertRenameCurrent();
         if (typeof snapshot.values.title !== 'string' || !snapshot.values.title) throw new AppError('SESSION_STATE_UNKNOWN', 'Native title projectionを確認できません。変更せずDSH GUIで確認してください。');
         const currentTitle = snapshot.values.title;
         if (requestedTitle === currentTitle) return { content: 'titleは既に指定値です。Nativeへの変更要求は送信していません。' };
@@ -333,15 +340,16 @@ export async function handleAgentCommand(
         const queued = ['next-turn', 'next-step'].some(key => (inbox[key] as unknown[]).length > 0);
         const tracked = engine.store.allRuns().some(run => run.sessionId === sessionId && ACTIVE_STATES.has(run.state));
         if (current.running || queued || tracked) throw new AppError('SESSION_BUSY', '実行中・処理待ち・結果不明のSessionは変更しません。');
-        engine.policy.authorize(actor.userId, actor.guildId, actor.channelId);
-        if (engine.binding(actor) !== sessionId || engine.bindingVersion(actor) !== bindingVersion) throw new AppError('BINDING_CONFLICT', 'Session選択が変更されました。titleは変更していません。');
+        assertRenameCurrent();
         const value = await renameSession({ sessionId, title: requestedTitle });
         try {
           await revalidateCurrentSession(engine, actor, sessionId, bindingVersion);
+          assertRenameCurrent();
           const readback = await engine.adapter.snapshot(sessionId);
+          assertRenameCurrent();
           if (readback.cursor < value.seq || readback.values.title !== value.title) throw new AppError('SESSION_RENAME_UNCONFIRMED', 'Native titleのreadbackを確認できません。');
         } catch (error) {
-          if (errorCode(error) === 'NOT_AUTHORIZED' || errorCode(error) === 'BINDING_CONFLICT') throw error;
+          if (errorCode(error) === 'NOT_AUTHORIZED' || errorCode(error) === 'BINDING_CONFLICT' || errorCode(error) === 'COMPACT_UNKNOWN') throw error;
           throw new AppError('SESSION_RENAME_UNCONFIRMED', 'Native title変更後のreadbackを確認できません。自動再送せずDSH GUIで確認してください。');
         }
         return { content: `選択中SessionのtitleをNativeで変更・readback確認しました。\nSession ID: ${safeId(engine, sessionId)}\ntitle: ${safeTitle(engine, value.title)}\nNative seq: ${value.seq}\nNative title CASはありません。外部Desktopとの同時変更はDSH GUIで確認してください。` };

@@ -72,6 +72,6 @@ export const HELP = `**DSH遠隔操作 — server-only**
 /agent modelsはNative model catalogのprovider/modelと実在するmodel別reasoning effort候補を検索するread-only機能です。providerの失敗本文は表示しません。model選択・reasoning変更・/agent newのtitle/model/effort指定・settings resetは未対応です。selectModelはSession専用CAS/readbackの根拠がなくHost既定も変更するため使いません。
 /agent renameは選択中・待機中SessionのtitleをNativeで変更しreadbackを確認します。Native title CASはありません。結果不明時は自動再送しないでDSH GUIで確認してください。
 /agent historyは未登録です。Native sessionQuery.filterEventsは存在しますが、Bridgeにrole/outputの安全なwhitelistとbounded materializationがありません。reasoning/secretsを含むraw pageを後から絞る代替は行いません。Bridgeの最終回答は/agent resultで確認してください。
-/agent context compactはNative commandを明示実行します。成功とno-opだけを簡潔に返し、結果不明は自動再送せずDSH GUIで確認してください。contextの実測値・上限・使用率は未対応です。通知先変更は今後のRunだけに適用され、origin公開には表示scopeでの明示確認が必要です。unknown通知は重複リスクを明示確認しない限り再試行できません。進捗通知は未対応で最終回答のみです。
+/agent context compactはNative commandを明示実行します。成功とno-opだけを簡潔に返し、結果不明は自動再送しません。未解決の結果はその完全なSessionだけに永続的なprompt/bind/title変更停止を適用し、このBridgeから解除・再送はできません。DSH GUIで確認してください。contextの実測値・上限・使用率は未対応です。通知先変更は今後のRunだけに適用され、origin公開には表示scopeでの明示確認が必要です。unknown通知は重複リスクを明示確認しない限り再試行できません。進捗通知は未対応で最終回答のみです。
 C機能（targeted stop、approval、bridge FIFO queue、attachments/artifacts、chat enable）は未登録・無効です。DM-only操作は設計・実証待ちで、DMからのコマンドは無効です。通常DM本文を実行しません。DSH GUIで停止・承認を確認してください。
 通知は実行状態と別管理です。結果は/agent resultでページごとに確認できます。DSHのOS権限が適用されます。`;

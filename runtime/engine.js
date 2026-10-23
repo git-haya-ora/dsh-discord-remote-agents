@@ -25,12 +25,13 @@ export class Engine {
     protectedPayloadStore;
     protectedIdentity;
     protectedOutputRequired;
+    compactSignal;
     ticking = false;
     protectedOutputLock = Promise.resolve();
     sessionMutations = new Set();
     protectedOutputFault;
     registerWorkspace;
-    constructor(adapter, store, policy, secrets = [], sharedDiscordBindings = false, protectedPayloadStore, protectedIdentity, protectedOutputRequired = false) {
+    constructor(adapter, store, policy, secrets = [], sharedDiscordBindings = false, protectedPayloadStore, protectedIdentity, protectedOutputRequired = false, compactSignal) {
         this.adapter = adapter;
         this.store = store;
         this.policy = policy;
@@ -39,6 +40,7 @@ export class Engine {
         this.protectedPayloadStore = protectedPayloadStore;
         this.protectedIdentity = protectedIdentity;
         this.protectedOutputRequired = protectedOutputRequired;
+        this.compactSignal = compactSignal;
         store.recoverDispatches();
         const persistedFault = store.setting('protected-output-blocked');
         if (persistedFault)
@@ -139,6 +141,40 @@ export class Engine {
     key(actor) { return bindingKey(actor.guildId, actor.channelId, this.sharedDiscordBindings && actor.guildId !== 'telegram' ? 'shared' : actor.userId); }
     binding(actor) { return this.store.binding(this.key(actor)); }
     bindingVersion(actor) { return this.store.bindingVersion(this.key(actor)); }
+    assertCompactHistoryKnown(sessionId) { this.store.assertNoUnknownCompactIntent(sessionId); }
+    compactSignalForOperation() {
+        return typeof this.compactSignal === 'function' ? this.compactSignal() : this.compactSignal;
+    }
+    assertCompactActive(signal = this.compactSignalForOperation()) {
+        if (signal?.aborted)
+            throw new AppError('COMPACT_UNAVAILABLE', 'HostのCompact操作は停止されています。');
+    }
+    async waitForCompactLifecycle(operation, signal = this.compactSignalForOperation()) {
+        if (!signal)
+            return operation;
+        if (signal.aborted)
+            throw new AppError('COMPACT_UNAVAILABLE', 'HostのCompact操作は停止されています。');
+        let onAbort;
+        const aborted = new Promise((_resolve, reject) => {
+            onAbort = () => reject(new AppError('COMPACT_UNAVAILABLE', 'HostのCompact操作は停止されています。'));
+            signal.addEventListener('abort', onAbort, { once: true });
+        });
+        if (signal.aborted)
+            onAbort();
+        try {
+            const value = await Promise.race([operation, aborted]);
+            this.assertCompactActive(signal);
+            return value;
+        }
+        finally {
+            signal.removeEventListener('abort', onAbort);
+        }
+    }
+    async runCompactStep(operation, signal = this.compactSignalForOperation()) {
+        this.assertCompactActive(signal);
+        const pending = operation();
+        return this.waitForCompactLifecycle(pending, signal);
+    }
     async selectedSession(actor) {
         this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
         const id = this.binding(actor), version = this.bindingVersion(actor);
@@ -150,8 +186,10 @@ export class Engine {
     }
     async bind(actor, sessionId, expectedVersion = this.bindingVersion(actor)) {
         this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+        this.assertCompactHistoryKnown(sessionId);
         await this.session(sessionId, actor);
         this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+        this.assertCompactHistoryKnown(sessionId);
         this.store.bind(this.key(actor), sessionId, expectedVersion, this.sharedDiscordBindings);
     }
     unbind(actor) { this.policy.authorize(actor.userId, actor.guildId, actor.channelId); this.store.unbind(this.key(actor)); }
@@ -167,7 +205,10 @@ export class Engine {
             throw new AppError('COMPACT_UNAVAILABLE', 'Compactの対象情報を確認できません。');
         if (!this.adapter.prepareCompactTarget || !this.adapter.isCompactTargetCurrent || !this.adapter.executeCompact)
             throw new AppError('COMPACT_UNAVAILABLE', 'Native Compact commandを利用できません。');
+        const compactSignal = this.compactSignalForOperation();
         return this.withSessionMutation(sessionId, async () => {
+            const assertCompactActive = () => this.assertCompactActive(compactSignal);
+            const runCompactStep = (operation) => this.runCompactStep(operation, compactSignal);
             const assertSelection = () => {
                 this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
                 if (this.binding(actor) !== sessionId || this.bindingVersion(actor) !== bindingVersion)
@@ -178,18 +219,22 @@ export class Engine {
                     throw new AppError('SESSION_BUSY', 'このSessionには未完了のBridge Runがあります。');
             };
             const inspectIdle = async (expectedCursor) => {
+                assertCompactActive();
                 assertSelection();
+                this.assertCompactHistoryKnown(sessionId);
                 assertNoRun();
-                const session = await this.session(sessionId, actor);
+                const session = await runCompactStep(() => this.session(sessionId, actor));
                 assertSelection();
+                this.assertCompactHistoryKnown(sessionId);
                 if (typeof session.running !== 'boolean')
                     throw new AppError('SESSION_STATE_UNKNOWN', 'Native Sessionの実行状態を確認できません。');
                 if (session.running)
                     throw new AppError('SESSION_BUSY', 'Native Sessionが実行中です。');
                 if (!session.cwd)
                     throw new AppError('WORKSPACE_DENIED', 'Sessionのworkspaceを確認できません。');
-                const snapshot = await this.adapter.snapshot(sessionId);
+                const snapshot = await runCompactStep(() => this.adapter.snapshot(sessionId));
                 assertSelection();
+                this.assertCompactHistoryKnown(sessionId);
                 if (!snapshot || typeof snapshot !== 'object' || !snapshot.values || typeof snapshot.values !== 'object'
                     || !Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < 0 || Object.is(snapshot.cursor, -0))
                     throw new AppError('SESSION_STATE_UNKNOWN', 'Native Sessionの状態を確認できません。');
@@ -211,16 +256,21 @@ export class Engine {
                 return { session, cursor: snapshot.cursor };
             };
             const initial = await inspectIdle();
+            assertCompactActive();
             const cwd = initial.session.cwd;
-            const target = await this.adapter.prepareCompactTarget(sessionId, cwd);
+            const target = await runCompactStep(() => this.adapter.prepareCompactTarget(sessionId, cwd));
+            assertCompactActive();
             assertSelection();
+            this.assertCompactHistoryKnown(sessionId);
             if (target.sessionId !== sessionId || target.cwd !== cwd || !target.agentId
                 || target.definitionId !== '@deepseek-ai/dsh-command-compact' || !this.adapter.isCompactTargetCurrent(target))
                 throw new AppError('COMPACT_TARGET_CHANGED', 'Native Compact対象が変わりました。再確認してください。');
             const fresh = await inspectIdle(initial.cursor);
+            assertCompactActive();
             if (fresh.session.cwd !== cwd || !this.adapter.isCompactTargetCurrent(target))
                 throw new AppError('COMPACT_TARGET_CHANGED', 'Native Compact対象が変わりました。再確認してください。');
             assertSelection();
+            this.assertCompactHistoryKnown(sessionId);
             assertNoRun();
             const intent = {
                 schemaVersion: 1, intentId: randomBytes(32).toString('hex'), sessionId, agentId: target.agentId,
@@ -230,6 +280,7 @@ export class Engine {
                 workspaceDigest: createHash('sha256').update(cwd).digest('hex'), definitionId: '@deepseek-ai/dsh-command-compact',
                 state: 'unknown', dispatchedAt: Date.now()
             };
+            assertCompactActive();
             this.store.reserveCompactIntent(intent);
             const unknownOutcome = (commandId) => {
                 if (commandId && commandId.length <= 128 && !/[\u0000-\u001f\u007f]/u.test(commandId)) {
@@ -250,7 +301,10 @@ export class Engine {
             };
             let execution;
             try {
-                execution = await this.adapter.executeCompact(target, new AbortController().signal);
+                assertCompactActive();
+                const executionSignal = compactSignal ?? new AbortController().signal;
+                const pending = this.adapter.executeCompact(target, executionSignal);
+                execution = await this.waitForCompactLifecycle(pending, compactSignal);
             }
             catch {
                 return unknownOutcome();
@@ -326,10 +380,19 @@ export class Engine {
         if (!sessionId)
             throw new AppError('NOT_BOUND', '/agent bindでセッションを選択してください。');
         return this.withSessionMutation(sessionId, async () => {
+            const assertCurrent = () => {
+                this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+                if (this.binding(actor) !== sessionId || this.bindingVersion(actor) !== bindingVersion)
+                    throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+                this.assertCompactHistoryKnown(sessionId);
+            };
+            assertCurrent();
             const session = await this.session(sessionId, actor);
+            assertCurrent();
             if (session.running)
                 throw new AppError('SESSION_BUSY', 'DSHが実行中です。完了後に送信してください。');
             let snapshot = await this.adapter.snapshot(sessionId);
+            assertCurrent();
             if (!Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < 0)
                 throw new AppError('SESSION_STATE_UNKNOWN', 'Native Session cursorを確認できません。PCで確認してください。');
             const runCursorFloor = snapshot.cursor;
@@ -344,25 +407,24 @@ export class Engine {
                     throw new AppError('SESSION_BUSY', 'DSHに未処理の指示があります。PCで確認してください。');
             };
             assertEmptyQueue(snapshot.values);
-            this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
-            if (this.binding(actor) !== sessionId || this.bindingVersion(actor) !== bindingVersion)
-                throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+            assertCurrent();
             await this.checkProtectedCapacity(MAX_ACTIVE_RUN_METADATA_RESERVE);
+            assertCurrent();
             // Quota/helper work is an await boundary: re-read the exact Native Session,
             // workspace, running state and queue, then check the binding revision again
             // synchronously immediately before durable admission and the only prompt.
             const confirmedSession = await this.session(sessionId, actor);
+            assertCurrent();
             if (confirmedSession.cwd !== session.cwd)
                 throw new AppError('SESSION_CHANGED', 'Native Session workspace identityが変わりました。');
             if (confirmedSession.running)
                 throw new AppError('SESSION_BUSY', 'DSHが実行中です。完了後に送信してください。');
             snapshot = await this.adapter.snapshot(sessionId);
+            assertCurrent();
             if (!Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < runCursorFloor)
                 throw new AppError('SESSION_STATE_UNKNOWN', 'Native Session cursorが不連続です。PCで確認してください。');
             assertEmptyQueue(snapshot.values);
-            this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
-            if (this.binding(actor) !== sessionId || this.bindingVersion(actor) !== bindingVersion)
-                throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
+            assertCurrent();
             const now = Date.now();
             const run = { id, requestId: `${actor.guildId === 'telegram' ? 'telegram' : 'discord'}:${id}`, sessionId, ...actor,
                 state: 'dispatching', createdAt: now, updatedAt: now, lastSeq: snapshot.cursor, startSeq: snapshot.cursor, payloadDigest, turn: null,
@@ -370,6 +432,7 @@ export class Engine {
                 ...(this.store.metadataOnly && actor.guildId !== 'telegram' ? { notificationPreferences: this.notificationPreferences(actor) } : {}),
                 ...(this.protectedOutputRequired && actor.guildId !== 'telegram' ? { requiresProtectedOutput: true } : {}),
                 notification: 'none', notifyAttempts: 0, nextNotifyAt: 0, lastError: '' };
+            assertCurrent();
             this.store.create(run); // Durable intent BEFORE the only prompt call. Never replay uncertain dispatches.
             try {
                 await this.adapter.prompt(sessionId, run.requestId, text);

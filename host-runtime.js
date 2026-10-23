@@ -118,7 +118,7 @@ export class DiscordHost {
     this.ctx = ctx; this.internals = internals;
     this.state = 'unconfigured'; this.lastError = ''; this.disposed = false; this.busy = false; this.bot = undefined; this.store = undefined; this.startGeneration = 0;
     this.settingsState = { profile, revision: 0, settings: null, secretRef: null, bot: null, retireRefs: [] };
-    this.nativeAbort = new AbortController(); this.lifecycleAbort = new AbortController(); this.compactServices = undefined;
+    this.nativeAbort = new AbortController(); this.lifecycleAbort = new AbortController(); this.compactAbort = new AbortController(); this.compactServices = undefined;
     try {
       keys(config, ['dataRoot']);
       const root = config.dataRoot ?? (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'DSHDiscordRemoteAgents', profile) : undefined);
@@ -128,7 +128,13 @@ export class DiscordHost {
       this.compatible = true;
     } catch (error) { this.compatible = false; this.state = 'blocked'; this.lastError = safeCode(error); }
   }
+  invalidateCompactLifecycle() {
+    this.compactAbort?.abort();
+    this.adapter?.invalidateCompactTargets();
+    if (!this.disposed) this.compactAbort = new AbortController();
+  }
   attachCompactServices(commands, agents) {
+    this.invalidateCompactLifecycle();
     this.compactServices = commands && agents ? { commands, agents } : undefined;
     if (this.adapter) this.adapter.attachCompactServices(commands, agents);
     return this.adapter ? this.adapter.commands !== undefined : !!(commands && agents);
@@ -286,6 +292,7 @@ export class DiscordHost {
   async start(signal = this.lifecycleAbort.signal) {
     if (this.disposed) fail('DISPOSED');
     if (this.bot?.client?.isReady?.()) return;
+    this.invalidateCompactLifecycle();
     if (this.bot) await this.stop();
     if (this.disposed || signal.aborted) fail('RECEIVER_NOT_READY');
     const generation = ++this.startGeneration;
@@ -298,7 +305,7 @@ export class DiscordHost {
     const policy = await awaitAbortable(Policy.create(config), signal); ensureCurrent();
     // Availability/protocol validation before advertising or starting native text capabilities.
     await awaitAbortable(this.adapter.list(), signal); ensureCurrent(); this.nativeVerified = true;
-    const engine = new Engine(this.adapter, this.store, policy, [candidate], true, this.protectedPayloadStore, { applicationId: settings.applicationId, botId: botIdentity.botId }, true);
+    const engine = new Engine(this.adapter, this.store, policy, [candidate], true, this.protectedPayloadStore, { applicationId: settings.applicationId, botId: botIdentity.botId }, true, () => this.compactAbort.signal);
     engine.registerWorkspace = async (actor, alias, path, confirmed) => {
       policy.authorize(actor.userId, actor.guildId, actor.channelId);
       if (!confirmed) fail('CONFIRMATION_REQUIRED');
@@ -338,6 +345,7 @@ export class DiscordHost {
     }
   }
   async stop() {
+    this.invalidateCompactLifecycle();
     this.startGeneration++;
     const bot = this.bot;
     if (bot) { await bot.stop(); this.bot = undefined; this.engine = undefined; }
@@ -355,7 +363,7 @@ export class DiscordHost {
   }
   async dispose() {
     if (this.disposed) return;
-    this.disposed = true; this.startGeneration++; this.lifecycleAbort.abort();
+    this.disposed = true; this.startGeneration++; this.lifecycleAbort.abort(); this.attachCompactServices(undefined, undefined);
     // Await our in-flight management operation only; never cancel native Session agents.
     await Promise.allSettled([...(this.inFlight ?? [])]);
     await this.stop(); this.nativeAbort.abort();

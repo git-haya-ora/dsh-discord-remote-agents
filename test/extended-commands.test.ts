@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ChatInputCommandInteraction } from 'discord.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { handleAgentCommand } from '../src/command-handler.js';
 import { Engine, type Actor } from '../src/engine.js';
-import { Store } from '../src/store.js';
+import { bindingKey, Store } from '../src/store.js';
 import { Policy } from '../src/policy.js';
 import { AppError } from '../src/errors.js';
 import type { Config } from '../src/config.js';
@@ -17,7 +20,7 @@ function interaction(sub: string, values: Record<string, string | number | boole
 }
 class Adapter implements AgentAdapter {
   rows: SessionInfo[] = [{ sessionId: 'native-session', title: '日本語😀', cwd: process.cwd(), running: false, subagent: false, updatedAt: 1 }];
-  listCalls = 0; creates = 0; prompts = 0; catalogCalls = 0; renameCalls: Array<{ sessionId: string; title: string }> = []; log: WireEvent[] = []; revoke: (() => void) | undefined;
+  listCalls = 0; creates = 0; prompts = 0; catalogCalls = 0; snapshotCalls = 0; renameCalls: Array<{ sessionId: string; title: string }> = []; log: WireEvent[] = []; revoke: (() => void) | undefined;
   inbox: Record<string, unknown> = { 'next-turn': [], 'next-step': [] };
   catalog: ModelCatalog = { default: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'medium' }, routableProviders: ['provider-a'],
     groups: [{ id: 'provider-a', name: 'Provider A', models: [{ id: 'model-a', name: 'Model A', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }], defaultEffort: 'medium' } }] }], failedProviders: 1 };
@@ -31,16 +34,17 @@ class Adapter implements AgentAdapter {
     const seq = (this.log.at(-1)?.seq ?? -1) + 1; this.log.push({ seq, time: 1, type: 'session/title', data: { title: request.title } });
     return { title: request.title, seq };
   }
-  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? 0, values: { inbox: this.inbox, title: this.rows[0]?.title } }; }
+  async snapshot(): Promise<Snapshot> { this.snapshotCalls++; return { cursor: this.log.at(-1)?.seq ?? 0, values: { inbox: this.inbox, title: this.rows[0]?.title } }; }
   async events(_id: string, through: number, after: number): Promise<WireEvent[]> { return this.log.filter(event => event.seq > after && event.seq <= through); }
   async history(): Promise<Array<{ seq: number; role: 'assistant'; text: string; reasoning?: string; tool?: string }>> { return [{ seq: 0, role: 'assistant', text: '安全😀'.repeat(300), reasoning: 'PRIVATE_REASONING', tool: 'PRIVATE_TOOL' }]; }
 }
-async function setup(t: { after(fn: () => unknown): void }) {
+async function setup(t: { after(fn: () => unknown): void }, databasePath = ':memory:') {
   const config: Config = { token: 'placeholder', applicationId: '444444444444444444', guildId: actor.guildId, allowedUserIds: new Set([actor.userId]), allowedChannelIds: new Set([actor.channelId]),
     workspaces: { test: process.cwd() }, dshUrl: 'http://127.0.0.1:19387', dshToken: 'placeholder', pollIntervalMs: 5000, databasePath: ':memory:' };
-  const store = new Store(':memory:', true); store.setSetting('restricted-storage-profile', 'single-operator-text-v1');
+  const store = new Store(databasePath, true); store.setSetting('restricted-storage-profile', 'single-operator-text-v1');
+  let closed = false; const close = () => { if (!closed) { store.close(); closed = true; } };
   const adapter = new Adapter(); const engine = new Engine(adapter, store, await Policy.create(config), ['PRIVATE_SECRET'], true); await engine.bind(actor, 'native-session');
-  t.after(() => store.close()); return { engine, store, adapter, config };
+  t.after(close); return { engine, store, adapter, config, close };
 }
 for (const setting of ['model', 'effort', 'title']) test(`unsupported new ${setting} refuses BEFORE Native create or prompt`, async t => {
   const { engine, adapter, config } = await setup(t);
@@ -89,6 +93,28 @@ test('/agent settings title requires no-CAS confirmation, serializes and readbac
   const response = await handleAgentCommand(interaction('title', { value: 'renamed', 'confirm-no-cas': true }, 'settings'), engine, config, true);
   assert.deepEqual(adapter.renameCalls, [{ sessionId: 'native-session', title: 'renamed' }]);
   assert.equal(adapter.rows[0]!.title, 'renamed'); assert.match(response.content, /readback確認/u); assert.match(response.content, /Native title CASはありません/u);
+});
+
+test('title mutation after restart is fenced by the durable unknown Compact for that exact Session', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'compact-rename-fence-synthetic-'));
+  const databasePath = join(root, 'journal.sqlite');
+  const fixture = await setup(t, databasePath);
+  fixture.store.reserveCompactIntent({
+    schemaVersion: 1, intentId: 'c'.repeat(64), sessionId: 'native-session', agentId: 'native-session',
+    applicationId: fixture.config.applicationId, botId: fixture.config.applicationId, ownerId: actor.userId,
+    guildId: actor.guildId, channelId: actor.channelId, bindingMode: 'shared',
+    bindingId: bindingKey(actor.guildId, actor.channelId, 'shared'), bindingVersion: fixture.engine.bindingVersion(actor),
+    workspaceDigest: 'd'.repeat(64), definitionId: '@deepseek-ai/dsh-command-compact', state: 'unknown', dispatchedAt: Date.now()
+  });
+  fixture.close();
+  const reopenedStore = new Store(databasePath, true);
+  t.after(() => reopenedStore.close());
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const reopenedEngine = new Engine(fixture.adapter, reopenedStore, await Policy.create(fixture.config), ['PRIVATE_SECRET'], true);
+  await assert.rejects(handleAgentCommand(interaction('title', { value: 'must-not-rename', 'confirm-no-cas': true }, 'settings'), reopenedEngine, fixture.config, true), { code: 'COMPACT_UNKNOWN' });
+  assert.equal(fixture.adapter.snapshotCalls, 0);
+  assert.equal(fixture.adapter.renameCalls.length, 0);
+  assert.equal(fixture.adapter.rows[0]!.title, '日本語😀');
 });
 
 test('title mutation fails closed on unknown queue or tracked busy Run', async t => {

@@ -42,8 +42,18 @@ export function apply(ctx, config = {}) {
   // The command service is an optional feature: profiles without it still get
   // the ordinary restricted Host runtime. Never add it to required injection.
   if (typeof ctx.inject === 'function') {
-    try { ctx.inject(['commands'], commands => host.attachCompactServices(commands, ctx.agents)); }
-    catch { /* Compact remains unavailable; core Host startup is unaffected. */ }
+    let compactServiceGeneration = 0;
+    try {
+      ctx.inject(['commands', 'agents'], services => {
+        const generation = ++compactServiceGeneration;
+        host.attachCompactServices(services.commands, services.agents);
+        services.effect(() => () => {
+          if (generation !== compactServiceGeneration) return;
+          compactServiceGeneration++;
+          host.attachCompactServices(undefined, undefined);
+        });
+      });
+    } catch { /* Compact remains unavailable; core Host startup is unaffected. */ }
   }
   // This exact route is reachable only through the official /api carrier, which
   // performs Host/Origin and browser-session admission BEFORE dispatching routes.
