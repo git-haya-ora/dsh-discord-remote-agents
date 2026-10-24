@@ -118,7 +118,7 @@ export class DiscordHost {
     this.ctx = ctx; this.internals = internals;
     this.state = 'unconfigured'; this.lastError = ''; this.disposed = false; this.busy = false; this.bot = undefined; this.store = undefined; this.startGeneration = 0;
     this.settingsState = { profile, revision: 0, settings: null, secretRef: null, bot: null, retireRefs: [] };
-    this.nativeAbort = new AbortController(); this.lifecycleAbort = new AbortController(); this.compactAbort = new AbortController(); this.compactServices = undefined;
+    this.nativeAbort = new AbortController(); this.lifecycleAbort = new AbortController(); this.compactAbort = new AbortController(); this.compactEngineAbort = new AbortController(); this.compactServices = undefined;
     try {
       keys(config, ['dataRoot']);
       const root = config.dataRoot ?? (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'DSHDiscordRemoteAgents', profile) : undefined);
@@ -132,6 +132,10 @@ export class DiscordHost {
     this.compactAbort?.abort();
     this.adapter?.invalidateCompactTargets();
     if (!this.disposed) this.compactAbort = new AbortController();
+  }
+  invalidateCompactEngine() {
+    this.compactEngineAbort?.abort();
+    if (!this.disposed) this.compactEngineAbort = new AbortController();
   }
   attachCompactServices(commands, agents) {
     this.invalidateCompactLifecycle();
@@ -305,7 +309,10 @@ export class DiscordHost {
     const policy = await awaitAbortable(Policy.create(config), signal); ensureCurrent();
     // Availability/protocol validation before advertising or starting native text capabilities.
     await awaitAbortable(this.adapter.list(), signal); ensureCurrent(); this.nativeVerified = true;
-    const engine = new Engine(this.adapter, this.store, policy, [candidate], true, this.protectedPayloadStore, { applicationId: settings.applicationId, botId: botIdentity.botId }, true, () => this.compactAbort.signal);
+    // Freeze the Host generation, but compose the current optional-service epoch per operation.
+    const engineLifetimeSignal = this.compactEngineAbort.signal;
+    const engineCompactSignal = () => AbortSignal.any([engineLifetimeSignal, this.compactAbort.signal]);
+    const engine = new Engine(this.adapter, this.store, policy, [candidate], true, this.protectedPayloadStore, { applicationId: settings.applicationId, botId: botIdentity.botId }, true, engineCompactSignal);
     engine.registerWorkspace = async (actor, alias, path, confirmed) => {
       policy.authorize(actor.userId, actor.guildId, actor.channelId);
       if (!confirmed) fail('CONFIRMATION_REQUIRED');
@@ -332,7 +339,12 @@ export class DiscordHost {
       ensureCurrent(); await bot.start(); ensureCurrent();
       if (bot.client?.isReady && !bot.client.isReady()) fail('RECEIVER_NOT_READY');
       this.state = 'connected';
-    } catch (error) { await bot.stop().catch(() => {}); if (this.bot === bot) this.bot = undefined; if (this.engine === engine) this.engine = undefined; this.state = this.disposed ? 'disposed' : 'stopped'; throw error; }
+    } catch (error) {
+      await bot.stop().catch(() => {});
+      if (this.bot === bot) this.bot = undefined;
+      if (this.engine === engine) { this.engine = undefined; this.invalidateCompactEngine(); this.invalidateCompactLifecycle(); }
+      this.state = this.disposed ? 'disposed' : 'stopped'; throw error;
+    }
     // Message failure is not a failed connection and must never trigger reconnect/prompt replay.
     this.connectionNoticeFailed = false;
     if (typeof bot.notifyConnected === 'function') {
@@ -345,7 +357,7 @@ export class DiscordHost {
     }
   }
   async stop() {
-    this.invalidateCompactLifecycle();
+    this.invalidateCompactEngine(); this.invalidateCompactLifecycle();
     this.startGeneration++;
     const bot = this.bot;
     if (bot) { await bot.stop(); this.bot = undefined; this.engine = undefined; }

@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
-import type { Engine } from '../src/engine.js';
+import type { Actor, Engine } from '../src/engine.js';
 import type { CompactTarget } from '../src/types.js';
 const { DiscordHost, validateBot } = await import(new URL('../../packages/discord-plugin/host-runtime.js', import.meta.url).href) as typeof import('../packages/discord-plugin/host-runtime.js');
 const { apply: applyDiscordPlugin, inject: requiredDiscordServices } = await import(new URL('../../packages/discord-plugin/index.js', import.meta.url).href) as { apply(ctx: unknown, config?: unknown): void; inject: string[] };
@@ -47,7 +47,7 @@ test('Native Compact services are optional; their absence preserves base Host st
   assert.equal(f.counts().receiverCreates, 1);
 });
 
-test('Host stop/restart invalidates old Compact targets and exposes a fresh current target', async t => {
+test('service reprovide keeps current Engine usable while stop/restart fences retained Engines', async t => {
   const f = await setup(t);
   const host = f.host as typeof f.host & {
     attachCompactServices(commands: unknown, agents: unknown): boolean;
@@ -55,21 +55,58 @@ test('Host stop/restart invalidates old Compact targets and exposes a fresh curr
     adapter: { prepareCompactTarget(sessionId: string, cwd: string): Promise<CompactTarget>; isCompactTargetCurrent(target: CompactTarget): boolean };
   };
   const sessionId = 'native-session-host-lifecycle-synthetic';
+  const actor: Actor = { userId: '111111111111111111', guildId, channelId: '333333333333333333' };
   const agent = { id: sessionId, session: { header: { id: sessionId, cwd: f.settings.workspaces.fixture } } };
-  Object.assign(f.ctx.sessionController, { resolveAgent: async () => ({ agent }) });
-  const commands = { find() { return { definitionId: '@deepseek-ai/dsh-command-compact' }; }, execute() { return {}; } };
+  let compactExecutions = 0;
+  Object.assign(f.ctx.sessionController, {
+    resolveAgent: async () => ({ agent }),
+    list: async () => ({ items: [{ sessionId, cwd: f.settings.workspaces.fixture, running: false, updatedAt: 1, projections: { values: { title: 'synthetic' } } }] }),
+    page: async () => ({ records: [], hasMore: false }),
+    projections: async () => ({ asOfSeq: 0, values: { inbox: { 'next-turn': [], 'next-step': [] } } })
+  });
+  const commands = {
+    find() { return { definitionId: '@deepseek-ai/dsh-command-compact' }; },
+    execute() { compactExecutions++; return { commandId: 'synthetic-compact-command', result: { kind: 'success', sourceEventSeq: 0 } }; }
+  };
   const agents = { get(id: string) { return id === sessionId ? agent : undefined; } };
   assert.equal(host.attachCompactServices(commands, agents), true);
   assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings: f.settings, token: syntheticToken })).ok, true);
   assert.equal((await f.host.dispatch({ operation: 'start', expectedRevision: 1, confirmation: true })).ok, true);
 
   const adapter = host.adapter;
-  const beforeStop = await adapter.prepareCompactTarget(sessionId, f.settings.workspaces.fixture);
+  await f.engine().bind(actor, sessionId);
+  const retainedEngine = f.engine();
+  const assertRetainedEngineFenced = async (expectedExecutions: number, expectedIntents: number) => {
+    const outcome = await retainedEngine.compact(actor, true).then(
+      value => ({ state: value.state }),
+      error => ({ code: error && typeof error === 'object' && 'code' in error ? error.code : 'UNKNOWN' })
+    );
+    assert.deepEqual(outcome, { code: 'COMPACT_UNAVAILABLE' });
+    assert.equal(compactExecutions, expectedExecutions);
+    assert.equal(f.store.compactIntents().length, expectedIntents);
+  };
+  const beforeWithdrawal = await adapter.prepareCompactTarget(sessionId, f.settings.workspaces.fixture);
+  assert.equal(adapter.isCompactTargetCurrent(beforeWithdrawal), true);
+  assert.equal(host.attachCompactServices(undefined, undefined), false);
+  assert.equal(adapter.isCompactTargetCurrent(beforeWithdrawal), false);
+  assert.equal(host.attachCompactServices(commands, agents), true);
+  const afterReprovide = await adapter.prepareCompactTarget(sessionId, f.settings.workspaces.fixture);
+  assert.equal(adapter.isCompactTargetCurrent(beforeWithdrawal), false);
+  assert.equal(adapter.isCompactTargetCurrent(afterReprovide), true);
+  const reprovideOutcome = await retainedEngine.compact(actor, true).then(
+    value => ({ state: value.state }),
+    error => ({ code: error && typeof error === 'object' && 'code' in error ? error.code : 'UNKNOWN' })
+  );
+  assert.deepEqual(reprovideOutcome, { state: 'completed' });
+  assert.equal(compactExecutions, 1);
+  assert.equal(f.store.compactIntents().length, 1);
+  const beforeStop = afterReprovide;
   const firstSignal = host.compactAbort.signal;
   assert.equal(adapter.isCompactTargetCurrent(beforeStop), true);
   assert.equal((await f.host.dispatch({ operation: 'stop', expectedRevision: 1 })).ok, true);
   assert.equal(firstSignal.aborted, true);
   assert.equal(adapter.isCompactTargetCurrent(beforeStop), false);
+  await assertRetainedEngineFenced(1, 1);
 
   const stoppedSignal = host.compactAbort.signal;
   assert.equal(stoppedSignal.aborted, false);
@@ -80,6 +117,12 @@ test('Host stop/restart invalidates old Compact targets and exposes a fresh curr
   const afterRestart = await adapter.prepareCompactTarget(sessionId, f.settings.workspaces.fixture);
   assert.equal(adapter.isCompactTargetCurrent(beforeStop), false);
   assert.equal(adapter.isCompactTargetCurrent(afterRestart), true);
+  await assertRetainedEngineFenced(1, 1);
+
+  const currentResult = await f.engine().compact(actor, true);
+  assert.equal(currentResult.state, 'completed');
+  assert.equal(compactExecutions, 2);
+  assert.equal(f.store.compactIntents().length, 2);
 
   await f.host.dispose();
   assert.equal(restartedSignal.aborted, true);
