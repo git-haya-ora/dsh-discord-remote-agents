@@ -33,6 +33,7 @@ export class DiscordBot {
     stopping = false;
     connectionNoticeAbort = new AbortController();
     workingNoticeAbort = new AbortController();
+    terminalNoticeAbort = new AbortController();
     connectionNoticeTask;
     stopTask;
     connectionNoticeId = randomUUID();
@@ -222,6 +223,33 @@ export class DiscordBot {
             throw new AppError('DELIVERY_BLOCKED', '作業開始通知の宛先確認を完了できませんでした。');
         }
     }
+    async waitForTerminalNoticeOperation(operation, sendStarted) {
+        const failure = () => sendStarted
+            ? new AppError('NOTIFICATION_UNKNOWN', '通知の送信結果が不明です。自動再送しません。')
+            : new AppError('DELIVERY_BLOCKED', '通知の宛先確認を完了できませんでした。');
+        const signal = this.terminalNoticeAbort.signal;
+        if (signal.aborted || this.stopping)
+            throw failure();
+        let timer;
+        let onAbort;
+        const aborted = new Promise((_resolve, reject) => {
+            onAbort = () => reject(failure());
+            signal.addEventListener('abort', onAbort, { once: true });
+        });
+        const deadline = new Promise((_resolve, reject) => { timer = setTimeout(() => reject(failure()), 10_000); });
+        try {
+            const value = await Promise.race([operation, aborted, deadline]);
+            if (signal.aborted || this.stopping)
+                throw failure();
+            return value;
+        }
+        finally {
+            if (timer)
+                clearTimeout(timer);
+            if (onAbort)
+                signal.removeEventListener('abort', onAbort);
+        }
+    }
     async notify(run, part) {
         if (run.guildId !== this.config.guildId)
             throw new AppError('DELIVERY_BLOCKED', '通知先が一致しません。');
@@ -235,16 +263,24 @@ export class DiscordBot {
             if (run.delivery?.destination === 'origin') {
                 if (run.delivery.guildId !== run.guildId || run.delivery.channelId !== run.channelId || run.delivery.userId !== run.userId)
                     throw new AppError('DELIVERY_BLOCKED', '固定された通知先が一致しません。');
-                const channel = await this.client.channels.fetch(run.delivery.channelId);
+                if (this.stopping || this.terminalNoticeAbort.signal.aborted)
+                    throw new AppError('DELIVERY_BLOCKED', '通知は停止されています。');
+                const channel = await this.waitForTerminalNoticeOperation(this.client.channels.fetch(run.delivery.channelId), false);
                 if (!channel || !channel.isSendable() || !('guildId' in channel) || channel.guildId !== run.delivery.guildId)
                     throw new AppError('DELIVERY_BLOCKED', '元の通知先へ配信できません。');
                 this.engine.policy.authorize(run.userId, run.guildId, run.channelId);
-                const sent = await channel.send(options);
+                if (this.stopping || this.terminalNoticeAbort.signal.aborted)
+                    throw new AppError('DELIVERY_BLOCKED', '通知は停止されています。');
+                const sent = await this.waitForTerminalNoticeOperation(channel.send(options), true);
                 return { messageId: sent.id };
             }
-            const user = await this.client.users.fetch(run.delivery?.userId ?? run.userId);
+            if (this.stopping || this.terminalNoticeAbort.signal.aborted)
+                throw new AppError('DELIVERY_BLOCKED', '通知は停止されています。');
+            const user = await this.waitForTerminalNoticeOperation(this.client.users.fetch(run.delivery?.userId ?? run.userId), false);
             this.engine.policy.authorize(run.userId, run.guildId, run.channelId);
-            const sent = await user.send(options);
+            if (this.stopping || this.terminalNoticeAbort.signal.aborted)
+                throw new AppError('DELIVERY_BLOCKED', '通知は停止されています。');
+            const sent = await this.waitForTerminalNoticeOperation(user.send(options), true);
             return { messageId: sent.id };
         }
         catch (error) {
@@ -297,6 +333,7 @@ export class DiscordBot {
         this.stopping = true;
         this.connectionNoticeAbort.abort();
         this.workingNoticeAbort.abort();
+        this.terminalNoticeAbort.abort();
         if (this.timer)
             clearInterval(this.timer);
         this.stopTask = (async () => {
