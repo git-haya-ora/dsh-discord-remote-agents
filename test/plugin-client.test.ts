@@ -61,7 +61,7 @@ test('Client manifest declares the official settings page and authenticated Conn
 });
 
 test('Client registers only the bundle configuration page and disposes locale/slot ownership',()=>{
- const c=capture(),s=services();c.plugin.apply(s.ctx);assert.equal(s.effects.length,2);assert.equal(s.registrations.length,0);assert.deepEqual(s.rpcCalls,[]);
+ const c=capture(),s=services();c.plugin.apply(s.ctx);assert.equal(s.effects.length,3);assert.equal(s.registrations.length,0);assert.deepEqual(s.rpcCalls,[]);
  assert.deepEqual([...s.owners.keys()],['plugins.bundle.config']);
  assert.deepEqual([...s.dictionaries.keys()].sort(),['discordRemoteAgents.settings:en','discordRemoteAgents.settings:ja','discordRemoteAgents.settings:zh']);
  s.appear();assert.equal(s.registrations.length,1);
@@ -96,5 +96,5 @@ test('Client source uses the narrow RPC and write-only secret path without brows
  assert.doesNotMatch(client,/https?:\/\/|@font-face|position\s*:\s*['"](?:fixed|absolute)/u);
  const constructed:string[]=[];
  visit(syntax,node=>{if(ts.isNewExpression(node))constructed.push(node.expression.getText(syntax));});
- assert.deepEqual([...new Set(constructed)].sort(),['AbortController','Error','Set']);
+ assert.deepEqual([...new Set(constructed)].sort(),['AbortController','Error','Promise','Set']);
 });

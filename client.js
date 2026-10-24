@@ -9,6 +9,8 @@ window.__ModuleLoader__.load({
     const NAMESPACE = 'discordRemoteAgents.settings';
     const CHANNEL = '/api';
     const ENDPOINT = 'discord-remote-agents.manage';
+    const STATUS_TIMEOUT_MS = 15000;
+    const MUTATION_TIMEOUT_MS = 45000;
     const STATES = new Set(['unconfigured', 'stopped', 'connecting', 'connected', 'blocked', 'disposed']);
     const CSS = `
 .dra-root{box-sizing:border-box;width:100%;max-width:760px;color:var(--dsw-alias-label-primary);font:inherit;line-height:1.5}
@@ -65,6 +67,18 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
 `;
     const dictionaries = {
       en: {
+        statusLoading: "Loading Host status. You can keep editing while you wait.",
+        retryStatus: "Retry status",
+        statusTimeout: "Host status timed out. Your input is kept; retry status to enable saving.",
+        saveBlocked: "Saving requires current Host status. Retry status below; your input will be kept.",
+        confirmAfterSave: "Settings saved. Check the confirmation for each action again before registering or connecting.",
+        confirmCommandsNeeded: "Check the command registration confirmation above.",
+        confirmStartNeeded: "Check the receiver confirmation above.",
+        tokenNeeded: "Save a bot token before registering or connecting.",
+        stateBlocked: "Starting is unavailable in the current receiver state. Review status and diagnostics.",
+        draftHelp: "Unsaved input is kept in memory while you navigate this GUI. Reloading or closing the GUI clears it, including the token. Nothing is stored in browser storage.",
+        waitingOperation: "An operation is in progress. Please wait.",
+        unknownBlocked: "The previous result is unknown. Refresh Host status before making further changes.",
         connectionNoticeWarning: 'Connection-notice delivery could not be confirmed. Check the receiver state above separately. The notice is not retried automatically.', connectionNoticeTitle: 'Connection notifications', connectionNoticeHelp: 'Optional, off by default. Sent once after a receiver start succeeds. Includes selected Session/project names and observed model metadata, never folder paths. Failure does not reconnect or retry.', connectionNoticeDm: 'Send to every allowed user by DM', connectionNoticeChannels: 'Publish to every allowed channel (visible to its members)',
         stepSave: "1 Save settings",
         stepCommands: "2 Add commands to Discord",
@@ -100,6 +114,18 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         noStatus: 'Host status is unavailable. Refresh before making changes.', loadFailed: 'Could not load Host status. No settings were changed.', connectionUnavailable: 'The authenticated DSH connection is unavailable.', operationFailed: 'The Host rejected the operation.', resultUnknown: 'The result could not be confirmed. The operation was not retried; refresh status before acting again.', invalidWorkspaces: 'Enter each workspace as alias=absolute-path on its own line.', testSuccess: 'Discord token test succeeded for ', testFailed: 'Discord token test failed.', saved: 'Settings saved.', started: 'Receiver started.', stopped: 'Receiver stopped.', reconnected: 'Reconnect requested.', commandsRegistered: 'Command registration completed.', secretDeleted: 'Stored token deleted.', unexpected: 'The Host returned an unexpected response.', busy: 'An operation is already in progress.',
       },
       zh: {
+        statusLoading: "正在读取 Host 状态。等待期间可以继续编辑。",
+        retryStatus: "重试 Host 状态",
+        statusTimeout: "读取 Host 状态超时。输入已保留；请重试状态以恢复保存。",
+        saveBlocked: "保存需要最新的 Host 状态。请在下方重试，输入将保留。",
+        confirmAfterSave: "设置已保存。请重新勾选注册命令或连接操作的确认。",
+        confirmCommandsNeeded: "请勾选上方注册命令的确认。",
+        confirmStartNeeded: "请勾选上方连接操作的确认。",
+        tokenNeeded: "请先保存 Bot token，再注册命令或连接。",
+        stateBlocked: "当前接收器状态无法启动，请检查状态与诊断。",
+        draftHelp: "在此 GUI 内切换页面时，未保存的输入仅保留在内存中。重新加载或关闭 GUI 会清除输入和 token。不写入浏览器存储。",
+        waitingOperation: "操作进行中，请稍候。",
+        unknownBlocked: "上次操作结果未知。请先刷新 Host 状态，再进行更改。",
         connectionNoticeWarning: '无法确认连接通知是否送达。请另外查看上方接收器状态。不会自动重发通知。', connectionNoticeTitle: '连接通知', connectionNoticeHelp: '可选，默认关闭。每次接收器成功启动后发送一次，包含已选 Session/项目名称与观测模型信息，不含文件夹路径。发送失败不会重连或重试。', connectionNoticeDm: '向每个允许用户发送私信', connectionNoticeChannels: '公开发送至每个允许频道（频道成员可见）',
         stepSave: "1 保存设置",
         stepCommands: "2 向 Discord 添加命令",
@@ -135,6 +161,18 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         noStatus: '无法获取 Host 状态。请先刷新，再进行更改。', loadFailed: '无法读取 Host 状态。未更改任何设置。', connectionUnavailable: '已认证的 DSH 连接不可用。', operationFailed: 'Host 拒绝了此操作。', resultUnknown: '无法确认操作结果。没有重试；再次操作前请刷新状态。', invalidWorkspaces: '请按每行 alias=绝对路径 的格式填写工作区。', testSuccess: 'Discord token 测试成功：', testFailed: 'Discord token 测试失败。', saved: '设置已保存。', started: '接收器已启动。', stopped: '接收器已停止。', reconnected: '已请求重新连接。', commandsRegistered: '命令注册已完成。', secretDeleted: '已删除保存的 token。', unexpected: 'Host 返回了非预期结果。', busy: '已有操作正在进行。',
       },
       ja: {
+        statusLoading: "Host状態を取得中です。待っている間も設定を入力できます。",
+        retryStatus: "Host状態を再取得",
+        statusTimeout: "Host状態の取得がタイムアウトしました。入力は保持しています。再取得すると保存を再開できます。",
+        saveBlocked: "保存には最新のHost状態が必要です。下の「Host状態を再取得」を押してください。入力は保持します。",
+        confirmAfterSave: "設定を保存しました。コマンド登録・接続の確認チェックをそれぞれ入れ直してください。",
+        confirmCommandsNeeded: "上のコマンド登録・更新の確認にチェックしてください。",
+        confirmStartNeeded: "上の接続操作の確認にチェックしてください。",
+        tokenNeeded: "先にBot tokenを入力して設定を保存してください。",
+        stateBlocked: "現在のReceiver状態では開始できません。状態と診断を確認してください。",
+        draftHelp: "未保存の入力は、このGUI内の画面移動ではメモリーに保持します。GUIの再読み込み・終了でTokenを含め消去します。ブラウザーのストレージには保存しません。",
+        waitingOperation: "別の操作が進行中です。完了をお待ちください。",
+        unknownBlocked: "直前の操作結果が不明です。Host状態を再取得してから操作してください。",
         connectionNoticeWarning: '接続通知の送達を確認できません。接続そのものの成否は上の状態をご確認ください。通知の自動再送はしません。', connectionNoticeTitle: '接続できたことをDiscordへ通知', connectionNoticeHelp: '任意・初期状態はオフです。Receiverの接続成功ごとに1回送ります。選択済みのプロジェクト・Session名と観測したモデルを含み、フォルダーのパスは送りません。両方を選ぶと両方へ送信します。通知失敗では再接続・自動再送しません。', connectionNoticeDm: '使う人全員へ本人DMで通知する', connectionNoticeChannels: '使うチャンネル全てへ公開する（そのチャンネルの参加者にも見えます）',
         stepSave: "1 設定を保存",
         stepCommands: "2 Discordにコマンドを追加",
@@ -244,6 +282,18 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
       }
       return result;
     }
+    // Compare effective nonsecret settings, not whether an input ever fired onChange.
+    function draftKey(draft) {
+      const workspaces = parseWorkspaces(draft.workspaces);
+      if (workspaces === null) return null;
+      return JSON.stringify({
+        guildId: draft.guildId.trim(), applicationId: draft.applicationId.trim(),
+        allowedUserIds: splitLines(draft.allowedUserIds).sort(),
+        allowedChannelIds: splitLines(draft.allowedChannelIds).sort(),
+        workspaces: Object.keys(workspaces).sort().map(alias => [alias, workspaces[alias]]),
+        autoStart: draft.autoStart, connectionDm: draft.connectionDm, connectionChannels: draft.connectionChannels,
+      });
+    }
     function displayCount(value) { return Number.isSafeInteger(value) && value >= 0 ? String(value) : '—'; }
 
     return {
@@ -251,50 +301,97 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NAMESPACE, { en: dictionaries.en, zh: dictionaries.zh }));
         ctx.effect(() => ctx.locale.register(NAMESPACE, 'ja', dictionaries.ja));
+        // Plugin-instance memory only: navigation may unmount the settings page.
+        // Never retain confirmations or put candidate credentials in browser storage.
+        const retained = { draft: null, token: '', uncertain: false };
+        ctx.effect(() => () => { retained.draft = null; retained.token = ''; retained.uncertain = false; });
 
         function SettingsPage({ t: translate, view }) {
           // A page-local choice: never change DSH's global language or persist secrets.
           const [language, setLanguage] = React.useState('system');
           const t = key => language === 'system' ? translate(key) : dictionaries[language][key] || translate(key);
           const [status, setStatus] = React.useState(null);
-          const [draft, setDraft] = React.useState(() => draftFrom(null));
-          const [dirty, setDirty] = React.useState(false);
-          const [tokenInput, setTokenInput] = React.useState('');
-          const [busy, setBusy] = React.useState(false);
+          const [draft, setDraft] = React.useState(() => retained.draft || draftFrom(null));
+          const [dirty, setDirty] = React.useState(!!retained.draft);
+          const [tokenInput, setTokenInput] = React.useState(retained.token);
+          const [busy, setBusy] = React.useState(true);
+          const [pendingOperation, setPendingOperation] = React.useState('status');
+          const [uncertain, setUncertain] = React.useState(retained.uncertain);
           const [message, setMessage] = React.useState(null);
           const [confirmCommands, setConfirmCommands] = React.useState(false);
           const [confirmDelete, setConfirmDelete] = React.useState(false);
           const [confirmExclusive, setConfirmExclusive] = React.useState(false);
           const [validation, setValidation] = React.useState(false);
           const [confirmAutoStart, setConfirmAutoStart] = React.useState(false);
-          const dirtyRef = React.useRef(false);
+          const dirtyRef = React.useRef(!!retained.draft);
+          const draftRef = React.useRef(draft);
+          const statusRef = React.useRef(null);
           const busyRef = React.useRef(false);
           const pendingRequests = React.useRef(new Set());
 
           function applyStatus(value, forceDraft = false) {
             const next = normalizeStatus(value);
             if (!next) return false;
+            const previous = statusRef.current;
+            statusRef.current = next;
             setStatus(next);
-            if (forceDraft || !status || next.revision !== status.revision) {
+            retained.uncertain = false;
+            setUncertain(false);
+            if (forceDraft || !previous || next.revision !== previous.revision) {
               setConfirmCommands(false);
               setConfirmExclusive(false);
             }
             if (forceDraft || !dirtyRef.current) {
               const nextDraft = draftFrom(next.settings);
+              retained.draft = null;
+              draftRef.current = nextDraft;
               setDraft(nextDraft);
               dirtyRef.current = false;
               setDirty(false);
             }
+            if (!forceDraft && dirtyRef.current) {
+              const key = draftKey(draftRef.current);
+              const changed = key === null || key !== draftKey(draftFrom(next.settings));
+              dirtyRef.current = changed;
+              setDirty(changed);
+              retained.draft = changed ? draftRef.current : null;
+            }
             return true;
           }
-          async function readStatus(signal) {
+          function updateToken(value) {
+            retained.token = value;
+            setTokenInput(value);
+          }
+          // Bound even an RPC implementation that ignores AbortSignal. Late replies
+          // never reach applyStatus; abort only cancels transport, not a Host mutation.
+          async function callHost(request, signal) {
             const rpc = ctx.connection && ctx.connection.rpc;
             if (!rpc || typeof rpc.call !== 'function') throw new Error('unavailable');
-            const envelope = await rpc.call(CHANNEL, ENDPOINT, { operation: 'status' }, signal);
+            const transport = new AbortController();
+            let timer;
+            let abort;
+            try {
+              return await new Promise((resolve, reject) => {
+                abort = () => { reject(new Error('aborted')); transport.abort(); };
+                if (signal.aborted) { abort(); return; }
+                signal.addEventListener('abort', abort, { once: true });
+                timer = setTimeout(() => {
+                  reject(new Error('timeout'));
+                  transport.abort();
+                }, request.operation === 'status' ? STATUS_TIMEOUT_MS : MUTATION_TIMEOUT_MS);
+                Promise.resolve(rpc.call(CHANNEL, ENDPOINT, request, transport.signal)).then(resolve, reject);
+              });
+            } finally {
+              clearTimeout(timer);
+              if (abort) signal.removeEventListener('abort', abort);
+            }
+          }
+          async function readStatus(signal) {
+            const envelope = await callHost({ operation: 'status' }, signal);
             const response = envelope?.ok === true ? envelope.value : null;
             if (signal.aborted) return;
             if (!isRecord(response) || response.ok !== true || !applyStatus(response.value)) {
-              setStatus(null);
+              statusRef.current = null; setStatus(null);
               throw new Error('invalid');
             }
           }
@@ -302,11 +399,12 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
             const controller = new AbortController();
             pendingRequests.current.add(controller);
             setBusy(true);
+            setPendingOperation('status');
             busyRef.current = true;
             void readStatus(controller.signal).then(() => {
               if (!controller.signal.aborted) setMessage(null);
-            }).catch(() => {
-              if (!controller.signal.aborted) setMessage({ kind: 'error', text: t('loadFailed') });
+            }).catch(error => {
+              if (!controller.signal.aborted) setMessage({ kind: 'error', text: t(error.message === 'timeout' ? 'statusTimeout' : 'loadFailed') });
             }).finally(() => {
               if (!controller.signal.aborted) {
                 pendingRequests.current.delete(controller);
@@ -325,15 +423,16 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
             if (busyRef.current) return;
             busyRef.current = true;
             setBusy(true);
+            setPendingOperation('status');
             setMessage(null);
             const controller = new AbortController();
             pendingRequests.current.add(controller);
             try {
               await readStatus(controller.signal);
-            } catch {
+            } catch (error) {
               if (!controller.signal.aborted) {
-                setStatus(null);
-                setMessage({ kind: 'error', text: t('loadFailed') });
+                statusRef.current = null; setStatus(null);
+                setMessage({ kind: 'error', text: t(error.message === 'timeout' ? 'statusTimeout' : 'loadFailed') });
               }
             } finally {
               if (!controller.signal.aborted) {
@@ -346,32 +445,33 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
 
           async function invoke(request, operation) {
             if (busyRef.current) return;
+            // No dispatch means a known local failure, not an uncertain Host result.
+            if (!ctx.connection?.rpc || typeof ctx.connection.rpc.call !== 'function') {
+              setMessage({ kind: 'error', text: t('connectionUnavailable') });
+              return;
+            }
             if (['start', 'registerCommands', 'reconnect'].includes(operation) && (dirtyRef.current || tokenInput.length > 0)) { setMessage({ kind: 'error', text: t('unsaved') }); return; }
             busyRef.current = true;
             setBusy(true);
+            setPendingOperation(operation);
             setMessage(null);
             const submittedToken = Object.hasOwn(request, 'token') ? request.token : undefined;
-            if (submittedToken !== undefined) setTokenInput('');
+            if (submittedToken !== undefined) updateToken('');
+            if (operation !== 'test') { retained.uncertain = true; setUncertain(true); }
             const controller = new AbortController();
             pendingRequests.current.add(controller);
             try {
-              const rpc = ctx.connection && ctx.connection.rpc;
-              if (!rpc || typeof rpc.call !== 'function') {
-                setMessage({ kind: 'error', text: t('connectionUnavailable') });
-                return;
-              }
-              const envelope = await rpc.call(CHANNEL, ENDPOINT, request, controller.signal);
+              const envelope = await callHost(request, controller.signal);
               const response = envelope?.ok === true ? envelope.value : null;
               if (controller.signal.aborted) return;
               if (!isRecord(response) || typeof response.ok !== 'boolean') {
-                setMessage({ kind: 'error', text: t('unexpected') });
-                return;
+                throw new Error('invalid');
               }
               if (response.ok !== true) {
                 const code = safeCode(response.code);
                 setMessage({ kind: 'error', text: code ? `${t('operationFailed')} ${code}` : t('operationFailed') });
                 if (operation !== 'test') {
-                  try { await readStatus(controller.signal); } catch { /* Status refresh is safe; never replay the mutation. */ }
+                  try { await readStatus(controller.signal); } catch { statusRef.current = null; setStatus(null); /* Status refresh is safe; never replay the mutation. */ }
                 }
                 return;
               }
@@ -384,7 +484,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
               if (isStatus(response.value)) {
                 applyStatus(response.value, operation === 'save');
               } else {
-                setStatus(null);
+                statusRef.current = null; setStatus(null);
                 await readStatus(controller.signal);
                 if (controller.signal.aborted) return;
               }
@@ -394,12 +494,12 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                     : operation === 'reconnect' ? 'reconnected'
                       : operation === 'registerCommands' ? 'commandsRegistered'
                         : operation === 'deleteSecret' ? 'secretDeleted' : 'unexpected';
-              setMessage({ kind: 'success', text: t(success) });
+              setMessage({ kind: 'success', text: t(operation === 'save' ? 'confirmAfterSave' : success) });
             } catch {
               if (!controller.signal.aborted) {
                 setMessage({ kind: 'error', text: t('resultUnknown') });
                 if (operation !== 'test') {
-                  try { await readStatus(controller.signal); } catch { setStatus(null); /* Do not replay an uncertain operation. */ }
+                  try { await readStatus(controller.signal); } catch { statusRef.current = null; setStatus(null); /* Do not replay an uncertain operation. */ }
                 }
               }
             } finally {
@@ -414,9 +514,15 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
           function edit(key, value) {
             setConfirmCommands(false);
             setConfirmExclusive(false);
-            dirtyRef.current = true;
-            setDirty(true);
-            setDraft(current => ({ ...current, [key]: value }));
+            const next = { ...draftRef.current, [key]: value };
+            const saved = statusRef.current;
+            const normalized = draftKey(next);
+            const changed = !saved || normalized === null || normalized !== draftKey(draftFrom(saved.settings));
+            draftRef.current = next;
+            retained.draft = changed ? next : null;
+            dirtyRef.current = changed;
+            setDirty(changed);
+            setDraft(next);
           }
           function revisionRequest(operation, extra = {}) {
             if (!status || !Number.isSafeInteger(status.revision)) return null;
@@ -428,7 +534,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
               id,
               className: `dra-control${options.secret ? ' dra-token' : ''}`,
               value: key === 'token' ? tokenInput : draft[key],
-              disabled: busy,
+              disabled: busy && pendingOperation !== 'status',
               'aria-invalid': validation && !!errors[key],
               'aria-describedby': [options.hint ? `${id}-hint` : '', validation && errors[key] ? `${id}-error` : ''].filter(Boolean).join(' ') || undefined,
               spellCheck: false,
@@ -438,7 +544,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                 if (key === 'token') {
                   setConfirmCommands(false);
                   setConfirmExclusive(false);
-                  setTokenInput(event.target.value);
+                  updateToken(event.target.value);
                 } else edit(key, event.target.value);
               },
             };
@@ -450,7 +556,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
           }
           function checkbox(label, checked, onChange, id) {
             return h('label', { className: 'dra-checkbox', htmlFor: id, key: id },
-              h('input', { id, type: 'checkbox', checked, disabled: busy, onChange: event => onChange(event.target.checked) }),
+              h('input', { id, type: 'checkbox', checked, disabled: busy && pendingOperation !== 'status', onChange: event => onChange(event.target.checked) }),
               h('span', null, label));
           }
           function capability(label, value, key) {
@@ -463,7 +569,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
             return h('div', { className: 'dra-stat', key }, h('dt', null, label), h('dd', null, displayCount(value)));
           }
 
-          const canMutate = !!status && Number.isSafeInteger(status.revision) && !busy;
+          const canMutate = !!status && Number.isSafeInteger(status.revision) && !busy && !uncertain;
           const state = status ? status.state : 'unknown';
           const workspaceMap = parseWorkspaces(draft.workspaces);
           const errors = {};
@@ -483,6 +589,11 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
           const canReconnect = canUseSaved && confirmExclusive && ['connected', 'connecting'].includes(state);
           const autoStartNeedsConsent = !!draft.autoStart && (!status || !isRecord(status.settings) || status.settings.autoStart !== true);
 
+          const commonBlock = busy ? t(pendingOperation === 'status' ? 'statusLoading' : 'waitingOperation')
+            : !status ? t('saveBlocked') : uncertain ? t('unknownBlocked') : '';
+          const savedBlock = commonBlock || (unsaved ? t('unsaved') : !status.settings || !status.tokenConfigured ? t('tokenNeeded') : '');
+          const commandsBlock = savedBlock || (!confirmCommands ? t('confirmCommandsNeeded') : '');
+          const startBlock = savedBlock || (!confirmExclusive ? t('confirmStartNeeded') : !canStart ? t('stateBlocked') : '');
           if (view !== 'page') return null;
           return h('div', { className: 'dra-root', 'aria-busy': busy ? 'true' : 'false' },
             h('style', null, CSS),
@@ -503,8 +614,12 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
               h('div', { className: 'dra-notice' },
                 h('strong', null, t('scope')),
                 h('p', null, t('scopeBody'))),
-              unsaved ? h('div', { className: 'dra-message' }, t('unsaved'), h('div', { className: 'dra-actions' }, h('button', { className: 'dra-button', type: 'button', disabled: !canMutate, onClick: () => { if (!status || busyRef.current) return; setTokenInput(''); dirtyRef.current = false; setDirty(false); setDraft(draftFrom(status.settings)); setValidation(false); setConfirmExclusive(false); setConfirmCommands(false); setConfirmAutoStart(false); } }, t('discard')))) : null,
+              unsaved ? h('div', { className: 'dra-message' }, t('unsaved'), h('div', { className: 'dra-actions' }, h('button', { className: 'dra-button', type: 'button', disabled: !canMutate, onClick: () => { if (!status || busyRef.current) return; updateToken(''); retained.draft = null; dirtyRef.current = false; setDirty(false); draftRef.current = draftFrom(status.settings); setDraft(draftRef.current); setValidation(false); setConfirmExclusive(false); setConfirmCommands(false); setConfirmAutoStart(false); } }, t('discard')))) : null,
               message ? h('div', { className: 'dra-message', 'data-kind': message.kind, role: message.kind === 'error' ? 'alert' : 'status', 'aria-live': 'polite' }, message.text) : null,
+              h('p', { className: 'dra-hint' }, t('draftHelp')),
+              commonBlock ? h('div', { className: 'dra-message', role: 'status', 'aria-live': 'polite' },
+                h('p', { id: 'dra-save-blocked', className: 'dra-copy' }, commonBlock),
+                h('div', { className: 'dra-actions' }, h('button', { className: 'dra-button', type: 'button', disabled: busy, onClick: refresh }, t('retryStatus')))) : null,
               h('form', { className: 'dra-section', onSubmit: event => {
                 event.preventDefault();
                 setValidation(true);
@@ -537,11 +652,11 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                     ...draft.workspaces.map((row, index) => h('div', { className: 'dra-grid', key: index },
                       ...['alias', 'path'].map(key => h('div', { className: 'dra-field', key },
                         h('label', { className: 'dra-label', htmlFor: 'dra-workspace-' + index + '-' + key }, t(key === 'alias' ? 'alias' : 'folder')),
-                        h('input', { id: 'dra-workspace-' + index + '-' + key, className: 'dra-control', value: row[key], disabled: busy, 'aria-invalid': validation && !!errors.workspaces, 'aria-describedby': validation && errors.workspaces ? 'dra-workspaces-help dra-workspaces-error' : 'dra-workspaces-help', onChange: event => edit('workspaces', draft.workspaces.map((item, i) => i === index ? { ...item, [key]: event.target.value } : item)) }))),
-                      h('button', { className: 'dra-button', type: 'button', disabled: busy, onClick: () => edit('workspaces', draft.workspaces.filter((_, i) => i !== index)) }, t('removeWorkspace')))),
+                        h('input', { id: 'dra-workspace-' + index + '-' + key, className: 'dra-control', value: row[key], disabled: busy && pendingOperation !== 'status', 'aria-invalid': validation && !!errors.workspaces, 'aria-describedby': validation && errors.workspaces ? 'dra-workspaces-help dra-workspaces-error' : 'dra-workspaces-help', onChange: event => edit('workspaces', draft.workspaces.map((item, i) => i === index ? { ...item, [key]: event.target.value } : item)) }))),
+                      h('button', { className: 'dra-button', type: 'button', disabled: busy && pendingOperation !== 'status', onClick: () => edit('workspaces', draft.workspaces.filter((_, i) => i !== index)) }, t('removeWorkspace')))),
                     h('span', { className: 'dra-hint', id: 'dra-workspaces-help' }, t('workspaceHelp')),
                     validation && errors.workspaces ? h('span', { className: 'dra-message', 'data-kind': 'error', id: 'dra-workspaces-error' }, errors.workspaces) : null,
-                    h('button', { className: 'dra-button', type: 'button', disabled: busy, onClick: () => edit('workspaces', [...draft.workspaces, { alias: '', path: '' }]) }, t('addWorkspace')))),
+                    h('button', { className: 'dra-button', type: 'button', disabled: busy && pendingOperation !== 'status', onClick: () => edit('workspaces', [...draft.workspaces, { alias: '', path: '' }]) }, t('addWorkspace')))),
                 h('fieldset', { className: 'dra-section', style: { borderLeft: 0, borderRight: 0, borderBottom: 0, margin: '14px 0 0', minWidth: 0 } },
                   h('legend', { className: 'dra-section-title' }, t('connectionNoticeTitle')),
                   h('p', { className: 'dra-hint', id: 'dra-connection-notice-help' }, t('connectionNoticeHelp')),
@@ -556,7 +671,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                 h('div', { className: 'dra-grid' },
                   field(t('tokenTitle'), 'token', { secret: true, hint: t('tokenHelp') })),
                 h('div', { className: 'dra-actions' },
-                  h('button', { className: 'dra-button', type: 'submit', 'data-kind': unsaved || !status || !status.tokenConfigured ? 'primary' : undefined, disabled: !canMutate }, busy ? t('saving') : t('save'))),
+                  h('button', { className: 'dra-button', type: 'submit', 'data-kind': unsaved || !status || !status.tokenConfigured ? 'primary' : undefined, disabled: !canMutate, 'aria-describedby': commonBlock ? 'dra-save-blocked' : undefined }, busy && pendingOperation === 'save' ? t('saving') : t('save'))),
                  h('details', null, h('summary', { className: 'dra-label' }, t('testToken')),
                  h('div', { className: 'dra-actions' },
                   h('button', { className: 'dra-button', type: 'button', disabled: !canTest, onClick: () => { if (!canTest) return; void invoke({ operation: 'test', ...(tokenInput.length > 0 ? { token: tokenInput } : {}) }, 'test'); } }, busy ? t('testing') : t('testToken')),
@@ -567,11 +682,12 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                  h('p', { className: 'dra-hint' }, t('commandsNote')),
                 checkbox(t('confirmCommands'), confirmCommands, setConfirmCommands, 'dra-confirm-commands'),
                 h('div', { className: 'dra-actions' },
-                  h('button', { className: 'dra-button', type: 'button', disabled: !canUseSaved || !confirmCommands || !status.tokenConfigured, onClick: () => {
+                  h('button', { className: 'dra-button', type: 'button', disabled: !canUseSaved || !confirmCommands || !status.tokenConfigured, 'aria-describedby': commandsBlock ? 'dra-commands-blocked' : undefined, onClick: () => {
                     if (!confirmCommands || !canUseSaved || !status || !status.tokenConfigured) return;
                     const request = revisionRequest('registerCommands', { confirmation: true });
                     if (request) { setConfirmCommands(false); void invoke(request, 'registerCommands'); }
-                  } }, busy ? t('registering') : t('registerCommands')))),
+                  } }, busy && pendingOperation === 'registerCommands' ? t('registering') : t('registerCommands'))),
+                commandsBlock ? h('p', { id: 'dra-commands-blocked', className: 'dra-hint' }, commandsBlock) : null),
               h('section', { className: 'dra-section', 'aria-labelledby': 'dra-status-title' },
                 h('h3', { id: 'dra-status-title', className: 'dra-section-title' }, t('stepStart')),
                 status ? h('div', { className: 'dra-status' },
@@ -583,8 +699,9 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                 checkbox(t('confirmExclusive'), confirmExclusive, setConfirmExclusive, 'dra-confirm-exclusive'),
                 h('div', { className: 'dra-actions' },
                   h('button', { className: 'dra-button', type: 'button', disabled: busy, onClick: refresh }, busy ? t('refreshing') : t('refresh')),
-                  h('button', { className: 'dra-button', type: 'button', 'data-kind': !unsaved && status && status.settings && status.tokenConfigured && state === 'stopped' ? 'primary' : undefined, disabled: !canStart, onClick: () => { if (!canStart) return; const request = revisionRequest('start', { confirmation: true }); if (request) { setConfirmExclusive(false); void invoke(request, 'start'); } } }, t('start')),
+                  h('button', { className: 'dra-button', type: 'button', 'data-kind': !unsaved && status && status.settings && status.tokenConfigured && state === 'stopped' ? 'primary' : undefined, disabled: !canStart, 'aria-describedby': startBlock ? 'dra-start-blocked' : undefined, onClick: () => { if (!canStart) return; const request = revisionRequest('start', { confirmation: true }); if (request) { setConfirmExclusive(false); void invoke(request, 'start'); } } }, t('start')),
                   h('button', { className: 'dra-button', type: 'button', disabled: !canStop, onClick: () => { if (!canStop) return; setConfirmExclusive(false); const request = revisionRequest('stop'); if (request) void invoke(request, 'stop'); } }, t('stop'))),
+                startBlock ? h('p', { id: 'dra-start-blocked', className: 'dra-hint' }, startBlock) : null,
                 h('p', { className: 'dra-hint' }, t('startHelp')),
                  status && status.lastError ? h('p', { className: 'dra-message', 'data-kind': 'error' }, status.lastError === 'CONNECTION_NOTICE_UNCONFIRMED' ? t('connectionNoticeWarning') : `${t('lastError')}: ${status.lastError}`) : null,
                  state === 'connected' ? h('p', { className: 'dra-copy' }, t('useHelp')) : null),

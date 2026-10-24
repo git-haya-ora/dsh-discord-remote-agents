@@ -14,7 +14,12 @@ function harness(call: (...args: any[]) => Promise<any>) {
     useRef(initial: any) { const i = cursor++; if (!(i in values)) values[i] = { current: initial }; return values[i]; },
     useEffect(action: () => () => void) { const i = cursor++; if (!(i in values)) { values[i] = true; effects.push(() => cleanups.push(action())); } },
   };
-  new Script(source).runInContext(createContext({ AbortController, window: { __ModuleLoader__: { load(value: any) { module = value; } } } }));
+  const timers = new Map<number, { action: () => void; delay: number }>();
+  let timerId = 0;
+  new Script(source).runInContext(createContext({ AbortController,
+    setTimeout(action: () => void, delay: number) { const id = ++timerId; timers.set(id, { action, delay }); return id; },
+    clearTimeout(id: number) { timers.delete(id); },
+    window: { __ModuleLoader__: { load(value: any) { module = value; } } } }));
   const ctx = { effect(action: any) { action(); }, locale: { register() { return () => {}; } }, connection: { rpc: { async call(...args: any[]) { return { ok: true, value: await call(...args) }; } } }, slots: { inject(_name: string, action: any) { action(); }, register(_options: any, value: any) { component = value; return () => {}; } } };
   module.factory(() => React).apply(ctx);
   function render() { cursor = 0; tree = component({ t: (key: string) => key, view: 'page' }); for (const effect of effects.splice(0)) effect(); return tree; }
@@ -23,7 +28,13 @@ function harness(call: (...args: any[]) => Promise<any>) {
   const button = (key: string) => { const node = all().find(node => node.type === 'button' && node.children.includes(key)); assert.ok(node, key); return node; };
   const settle = async () => { for (let i = 0; i < 16; i++) await Promise.resolve(); render(); };
   render();
-  return { render, all, id, button, settle, unmount() { for (const cleanup of cleanups) cleanup(); } };
+  function unmount() { for (const cleanup of cleanups.splice(0)) cleanup(); }
+  return { render, all, id, button, settle, unmount,
+    remount() { unmount(); values.length = 0; render(); },
+    expire(delay: number) { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.action(); } },
+    timerCount() { return timers.size; },
+    disconnect() { Object.assign(ctx.connection, { rpc: undefined }); },
+  };
 }
 const status = (revision = 1, autoStart = false) => ({ profile: 'single-operator-text-v1', revision, state: 'stopped', tokenConfigured: true, settings: { guildId: '11111111111111111', applicationId: '22222222222222222', allowedUserIds: ['33333333333333333'], allowedChannelIds: ['44444444444444444'], workspaces: { main: 'C:\\Work' }, autoStart }, capabilities: {} });
 test('Japanese delivery warning does not label a connected receiver as failed or disable settings', async () => {
@@ -170,4 +181,88 @@ for (const [field, value] of [
   h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); h.render();
   assert.equal(calls, 1); assert.equal(h.id('dra-token').props.value, 'synthetic-only');
   assert.equal(h.id(`dra-${field}`).props['aria-invalid'], true); h.unmount();
+});
+
+test('status timeout releases controls, retains input, and supports explicit retry', async () => {
+  let calls = 0, resolveLate: (value: any) => void = () => {};
+  const h = harness(async () => { calls++; return calls === 1 ? await new Promise(done => { resolveLate = done; }) : { ok: true, value: status(2) }; });
+  assert.equal(h.id('dra-guildId').props.disabled, false);
+  h.id('dra-guildId').props.onChange({ target: { value: '55555555555555555' } });
+  h.id('dra-token').props.onChange({ target: { value: 'synthetic-only' } }); h.render();
+  assert.equal(h.button('save').props.disabled, true);
+  h.expire(15000); await h.settle();
+  assert.ok(h.all().some(n => n.children.includes('statusTimeout')));
+  assert.equal(h.button('retryStatus').props.disabled, false);
+  assert.equal(h.id('dra-guildId').props.value, '55555555555555555');
+  h.button('retryStatus').props.onClick(); await h.settle();
+  assert.equal(h.button('save').props.disabled, false);
+  assert.equal(h.id('dra-token').props.value, 'synthetic-only');
+  resolveLate({ ok: true, value: status(99) }); await h.settle();
+  assert.equal(h.id('dra-guildId').props.value, '55555555555555555');
+  assert.equal(h.timerCount(), 0); h.unmount();
+});
+
+test('draft and candidate token survive page remount but action confirmations do not', async () => {
+  const calls: any[] = [];
+  const h = harness(async (...args) => { calls.push(args[2]); return { ok: true, value: status() }; }); await h.settle();
+  h.id('dra-guildId').props.onChange({ target: { value: '55555555555555555' } });
+  h.id('dra-token').props.onChange({ target: { value: 'synthetic-only' } });
+  h.id('dra-confirm-exclusive').props.onChange({ target: { checked: true } });
+  h.remount(); await h.settle();
+  assert.equal(h.id('dra-guildId').props.value, '55555555555555555');
+  assert.equal(h.id('dra-token').props.value, 'synthetic-only');
+  assert.equal(h.id('dra-confirm-exclusive').props.checked, false);
+  assert.equal(h.button('start').props.disabled, true);
+  assert.deepEqual(calls.map(r => r.operation), ['status', 'status']);
+  h.button('discard').props.onClick(); h.remount(); await h.settle();
+  assert.equal(h.id('dra-guildId').props.value, status().settings.guildId);
+  assert.equal(h.id('dra-token').props.value, ''); h.unmount();
+});
+
+test('returning settings to their saved value removes the dirty gate without saving', async () => {
+  const h = harness(async () => ({ ok: true, value: status() })); await h.settle();
+  h.id('dra-guildId').props.onChange({ target: { value: '55555555555555555' } }); h.render();
+  assert.equal(h.button('registerCommands').props.disabled, true);
+  h.id('dra-guildId').props.onChange({ target: { value: ` ${status().settings.guildId} ` } }); h.render();
+  h.id('dra-confirm-commands').props.onChange({ target: { checked: true } });
+  h.id('dra-confirm-exclusive').props.onChange({ target: { checked: true } }); h.render();
+  assert.equal(h.button('registerCommands').props.disabled, false);
+  assert.equal(h.button('start').props.disabled, false); h.unmount();
+});
+
+test('timed-out mutation is not replayed, even when recovery status also times out', async () => {
+  const calls: any[] = [];
+  const h = harness(async (...args) => { calls.push(args[2]); return calls.length === 1 ? { ok: true, value: status() } : await new Promise(() => {}); }); await h.settle();
+  h.id('dra-confirm-exclusive').props.onChange({ target: { checked: true } }); h.render();
+  h.button('start').props.onClick(); h.expire(45000); await h.settle();
+  assert.deepEqual(calls.map(r => r.operation), ['status', 'start', 'status']);
+  h.expire(15000); await h.settle();
+  assert.equal(h.button('retryStatus').props.disabled, false);
+  assert.equal(h.button('start').props.disabled, true);
+  assert.ok(h.all().some(n => n.children.includes('resultUnknown')));
+  assert.equal(h.timerCount(), 0); h.unmount();
+});
+
+test('failed status refresh invalidates the comparison baseline before draft retention', async () => {
+  let calls = 0;
+  const h = harness(async () => { calls++; if (calls === 1) return { ok: true, value: status() }; throw Error('offline'); }); await h.settle();
+  h.id('dra-guildId').props.onChange({ target: { value: '55555555555555555' } }); h.render();
+  h.button('refresh').props.onClick(); await h.settle();
+  h.id('dra-guildId').props.onChange({ target: { value: status().settings.guildId } }); h.render();
+  h.remount(); await h.settle();
+  assert.equal(h.id('dra-guildId').props.value, status().settings.guildId);
+  assert.equal(h.button('save').props.disabled, true);
+  assert.equal(h.button('retryStatus').props.disabled, false); h.unmount();
+});
+
+test('missing RPC is a known local failure and preserves an unsubmitted token', async () => {
+  let calls = 0;
+  const h = harness(async () => { calls++; return { ok: true, value: status() }; }); await h.settle();
+  h.id('dra-token').props.onChange({ target: { value: 'synthetic-only' } }); h.render(); h.disconnect();
+  h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); await h.settle();
+  assert.equal(calls, 1);
+  assert.equal(h.id('dra-token').props.value, 'synthetic-only');
+  assert.ok(h.all().some(n => n.children.includes('connectionUnavailable')));
+  assert.ok(!h.all().some(n => n.children.includes('resultUnknown')));
+  assert.equal(h.button('save').props.disabled, false); h.unmount();
 });
