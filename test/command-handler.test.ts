@@ -104,6 +104,7 @@ test('command schema stays within Discord option limits and registers only verif
   assert.equal(compact?.options?.find(option => option.name === 'confirm')?.required, true);
   const context = schema.options.find(option => option.name === 'context');
   assert.equal(context?.type, 2);
+  assert.equal(context?.options?.find(option => option.name === 'show')?.type, 1);
   const contextCompact = context?.options?.find(option => option.name === 'compact');
   assert.equal(contextCompact?.type, 1);
   assert.equal(contextCompact?.options?.find(option => option.name === 'confirm')?.required, true);

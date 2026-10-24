@@ -2,7 +2,7 @@ import { AttachmentBuilder, escapeMarkdown, type ChatInputCommandInteraction } f
 import type { Config } from './config.js';
 import { Engine, type Actor } from './engine.js';
 import { AppError, errorCode } from './errors.js';
-import type { Run, RunState, SessionInfo, SessionModel } from './types.js';
+import type { ContextMetrics, Run, RunState, SessionInfo, SessionModel } from './types.js';
 import { terminal } from './types.js';
 import { HELP } from './commands.js';
 import { normalize, resolve } from 'node:path';
@@ -202,7 +202,7 @@ function helpFor(topic: string | null): string {
     models: '利用可能model catalogは/agent modelsで検索できます。provider/modelとNativeが公開するmodel別reasoning effort候補だけを表示し、provider failure本文は表示しません。model選択は未対応です。',
     reasoning: 'reasoning effort候補は/agent modelsと/agent currentに表示します。effort変更は正式なSession専用read/write/CAS/readback適用確認がないため未対応です。',
     settings: '/agent settings title value:<title>（/agent rename alias）は待機Sessionのtitleだけ変更します。model/reasoning settings変更・resetはSession単位の安全なrevision/CAS/readback根拠がないため未対応です。',
-    context: 'contextの実測値・上限・使用率は未対応です。/agent context compact confirm:trueは明示確認の上でNative commandを実行します。結果不明の場合は再送せずDSH GUIで確認してください。',
+    context: '/agent context showはNativeの選択済みprojection数値だけを表示します。鮮度・同一時点の測定・実際のoccupancy/使用率・費用は保証しません。/agent context compact confirm:trueは明示確認の上でNative commandを実行し、結果不明時は再送せずDSH GUIで確認してください。',
     compact: 'Native Compact commandを実行します。Session historyを変更する可能性があり、成功はsourceEventSeq付きNative command結果でのみ確定します。結果不明は再送せずDSH GUIで確認してください。',
     dm: 'DM-onlyは設計・実証待ちです。コマンド登録はserver-onlyで、DM slash/通常メッセージは受け付けません。完了通知DMはDM操作の根拠ではありません。',
     stop: 'stop未対応: 特定Run停止は未対応です。Native Session cancelはSession全体対象でRun/turn/CAS指定がありません。他のDesktop実行を止めない保証がないため代用しません。DSH GUIを利用してください。',
@@ -220,6 +220,24 @@ function compactResponse(state: 'completed' | 'noop' | 'unknown'): string {
   if (state === 'completed') return 'Native Compact commandの成功を記録しました（完了eventを確認済み）。内容の変化はDSH GUIで確認してください。';
   if (state === 'noop') return 'Native Compactをcanonical no-opとして記録しました。Session全体が不変という意味ではありません。';
   return 'Native Compactの結果は不明です。実行済みの可能性があります。再送せず、DSH GUIで状態を確認してください。';
+}
+
+function contextMetricsResponse(engine: Engine, observation: { sessionId: string; metrics?: ContextMetrics }): string {
+  const metrics = observation.metrics;
+  const fields: Array<[keyof ContextMetrics, string]> = [
+    ['pressureTokens', 'Prompt-side pressure projection'], ['projectedTokens', 'Next-request forecast'],
+    ['contextWindow', 'Last-request context window'], ['systemTokens', 'Heuristic system tokens'],
+    ['toolsTokens', 'Heuristic tools tokens'], ['messageTokens', 'Heuristic message tokens']
+  ];
+  const lines = [`Native context projection（Session ${safeId(engine, observation.sessionId)}）`];
+  if (!metrics) lines.push('Projection values: 未取得（exact live Sessionまたはoptional service/key/valueが利用できません）。');
+  else for (const [key, label] of fields) {
+    const value = metrics[key];
+    lines.push(`${label} (${key}): ${typeof value === 'number' ? `${value.toLocaleString('en-US')} tokens` : '未取得'}`);
+  }
+  if (metrics?.asOfSeq !== undefined) lines.push(`Fold cursor (asOfSeq): ${metrics.asOfSeq}（測定時刻/使用量sample sequenceではありません）`);
+  lines.push('注意: これらは別々のNative projectionであり、同一requestのatomicな観測ではありません。pressureは直近prompt-side aggregate、projectedは予測、windowはlast-request容量、breakdownはheuristicです。0もsampleの存在や鮮度を証明しません。実際のoccupancy/使用率・currentness・費用は推測しません。');
+  return lines.join('\n');
 }
 
 export async function handleAgentCommand(
@@ -269,6 +287,11 @@ export async function handleAgentCommand(
     throw new AppError('UNKNOWN_COMMAND', '未対応のnotifications操作です。');
   }
 
+  if (group === 'context' && sub === 'show') {
+    const observation = await engine.contextMetrics(actor);
+    if (!observation) return { content: '選択中のSessionはありません。/agent sessionsで確認して/agent bind session:<id>を実行してください。' };
+    return { content: contextMetricsResponse(engine, observation) };
+  }
   if (sub === 'compact') {
     if (group !== null && group !== 'context') throw new AppError('UNKNOWN_COMMAND', '未対応のcontext操作です。');
     if (interaction.options.getBoolean('confirm', true) !== true) throw new AppError('CONFIRMATION_REQUIRED', 'Native CompactがSession contextを変更する可能性をconfirm:trueで確認してください。');
@@ -475,7 +498,7 @@ export async function handleAgentCommand(
       const lastRunError = engine.store.allRuns()
         .filter(run => run.userId === actor.userId && run.guildId === actor.guildId && run.channelId === actor.channelId && run.lastError)
         .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.lastError;
-      return { content: `接続診断（server-only / authorized）\n${connectivity}\nAdapter mapping:\n${capabilities.join('\n')}\nNative version: 不明（Adapterの公開契約なし）\nHistory: unavailable（Native sessionQuery.filterEvents is available, but role/output and bounded materialization are not safely implemented）\nModel catalog: methodがあればread-only表示可能。model/reasoning選択はHost既定も変える可能性があり未対応\nSettings reset: unavailable（Session専用CAS/readbackなし）\nContext: sessionStatsの実測context使用量・上限は保証なし\n通知滞留: ${preferences.pending} pending / ${preferences.unknown} unknown/sending / ${preferences.blocked} blocked / ${preferences.incomplete} incomplete / ${preferences.undeliveredParts} 未送信part\n最後の安全なエラーコード: ${lastRunError ? safeErrorLabel(lastRunError) : '記録なし'}\nToken・ローカルパス・raw errorは表示しません。` };
+      return { content: `接続診断（server-only / authorized）\n${connectivity}\nAdapter mapping:\n${capabilities.join('\n')}\nNative version: 不明（Adapterの公開契約なし）\nHistory: unavailable（Native sessionQuery.filterEvents is available, but role/output and bounded materialization are not safely implemented）\nModel catalog: methodがあればread-only表示可能。model/reasoning選択はHost既定も変える可能性があり未対応\nSettings reset: unavailable（Session専用CAS/readbackなし）\nContext: /agent context showはoptional Native projection scalarsだけを表示。atomic usage/freshness/occupancy/costは保証なし\n通知滞留: ${preferences.pending} pending / ${preferences.unknown} unknown/sending / ${preferences.blocked} blocked / ${preferences.incomplete} incomplete / ${preferences.undeliveredParts} 未送信part\n最後の安全なエラーコード: ${lastRunError ? safeErrorLabel(lastRunError) : '記録なし'}\nToken・ローカルパス・raw errorは表示しません。` };
     }
     default:
       throw new AppError('UNKNOWN_COMMAND', '未対応コマンドです。/agent helpで使用可能な操作を確認してください.');

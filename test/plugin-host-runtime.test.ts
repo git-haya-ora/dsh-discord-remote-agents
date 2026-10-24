@@ -51,12 +51,20 @@ test('service reprovide keeps current Engine usable while stop/restart fences re
   const f = await setup(t);
   const host = f.host as typeof f.host & {
     attachCompactServices(commands: unknown, agents: unknown): boolean;
+    attachContextMetricServices(sessions: unknown, sessionProjections: unknown): boolean;
     compactAbort: AbortController;
     adapter: { prepareCompactTarget(sessionId: string, cwd: string): Promise<CompactTarget>; isCompactTargetCurrent(target: CompactTarget): boolean };
   };
   const sessionId = 'native-session-host-lifecycle-synthetic';
   const actor: Actor = { userId: '111111111111111111', guildId, channelId: '333333333333333333' };
   const agent = { id: sessionId, session: { header: { id: sessionId, cwd: f.settings.workspaces.fixture } } };
+  const liveSession = { header: { id: sessionId, cwd: f.settings.workspaces.fixture } };
+  const projectionCalls: unknown[][] = [];
+  const sessions = { get(id: string) { return id === sessionId ? liveSession : undefined; } };
+  const sessionProjections = { snapshot(candidate: unknown, keys: Iterable<string>) {
+    projectionCalls.push([candidate, [...keys]]);
+    return { asOfSeq: projectionCalls.length, values: { contextPressure: { pressureTokens: 9, projectedTokens: 12 } } };
+  } };
   let compactExecutions = 0;
   Object.assign(f.ctx.sessionController, {
     resolveAgent: async () => ({ agent }),
@@ -76,6 +84,12 @@ test('service reprovide keeps current Engine usable while stop/restart fences re
   const adapter = host.adapter;
   await f.engine().bind(actor, sessionId);
   const retainedEngine = f.engine();
+  assert.deepEqual(await retainedEngine.contextMetrics(actor), { sessionId });
+  assert.equal(projectionCalls.length, 0);
+  assert.equal(host.attachContextMetricServices(sessions, sessionProjections), true);
+  const firstMetrics = await retainedEngine.contextMetrics(actor);
+  assert.deepEqual(firstMetrics, { sessionId, metrics: { pressureTokens: 9, projectedTokens: 12, asOfSeq: 1 } });
+  assert.deepEqual(projectionCalls[0], [liveSession, ['contextPressure', 'contextBreakdown']]);
   const assertRetainedEngineFenced = async (expectedExecutions: number, expectedIntents: number) => {
     const outcome = await retainedEngine.compact(actor, true).then(
       value => ({ state: value.state }),
@@ -100,6 +114,7 @@ test('service reprovide keeps current Engine usable while stop/restart fences re
   assert.deepEqual(reprovideOutcome, { state: 'completed' });
   assert.equal(compactExecutions, 1);
   assert.equal(f.store.compactIntents().length, 1);
+  assert.deepEqual(await retainedEngine.contextMetrics(actor), { sessionId, metrics: { pressureTokens: 9, projectedTokens: 12, asOfSeq: 2 } });
   const beforeStop = afterReprovide;
   const firstSignal = host.compactAbort.signal;
   assert.equal(adapter.isCompactTargetCurrent(beforeStop), true);
@@ -107,6 +122,9 @@ test('service reprovide keeps current Engine usable while stop/restart fences re
   assert.equal(firstSignal.aborted, true);
   assert.equal(adapter.isCompactTargetCurrent(beforeStop), false);
   await assertRetainedEngineFenced(1, 1);
+  const projectionCallsAfterStop = projectionCalls.length;
+  await assert.rejects(retainedEngine.contextMetrics(actor), { code: 'CONTEXT_METRICS_UNAVAILABLE' });
+  assert.equal(projectionCalls.length, projectionCallsAfterStop);
 
   const stoppedSignal = host.compactAbort.signal;
   assert.equal(stoppedSignal.aborted, false);
@@ -118,8 +136,11 @@ test('service reprovide keeps current Engine usable while stop/restart fences re
   assert.equal(adapter.isCompactTargetCurrent(beforeStop), false);
   assert.equal(adapter.isCompactTargetCurrent(afterRestart), true);
   await assertRetainedEngineFenced(1, 1);
+  const restartedEngine = f.engine();
+  assert.deepEqual(await restartedEngine.contextMetrics(actor), { sessionId, metrics: { pressureTokens: 9, projectedTokens: 12, asOfSeq: 3 } });
+  assert.equal(projectionCalls.length, 3);
 
-  const currentResult = await f.engine().compact(actor, true);
+  const currentResult = await restartedEngine.compact(actor, true);
   assert.equal(currentResult.state, 'completed');
   assert.equal(compactExecutions, 2);
   assert.equal(f.store.compactIntents().length, 2);
@@ -127,6 +148,8 @@ test('service reprovide keeps current Engine usable while stop/restart fences re
   await f.host.dispose();
   assert.equal(restartedSignal.aborted, true);
   assert.equal(adapter.isCompactTargetCurrent(afterRestart), false);
+  await assert.rejects(restartedEngine.contextMetrics(actor), { code: 'CONTEXT_METRICS_UNAVAILABLE' });
+  assert.equal(projectionCalls.length, 3);
 });
 
 test('Cordis optional services attach, withdraw, reprovide, and dispose through the actual Host child fiber', async t => {
@@ -136,19 +159,28 @@ test('Cordis optional services attach, withdraw, reprovide, and dispose through 
   const connection = { fetch: { register() { return () => {}; } } };
   const sessionController = { async list() {}, async create() {}, async projections() {}, async page() {}, async prompt() {} };
   const commands = { find() {}, execute() {} }, agents = { get() {} };
+  const sessions = { get() {} }, sessionProjections = { snapshot() {} };
   const disposers: Array<() => void | Promise<void>> = [
     await context.provide('connection', connection), await context.provide('sessionController', sessionController),
-    await context.provide('commands', commands), await context.provide('agents', agents)
+    await context.provide('commands', commands), await context.provide('agents', agents),
+    await context.provide('sessions', sessions), await context.provide('sessionProjections', sessionProjections)
   ];
   const attachCalls: Array<[unknown, unknown]> = [];
+  const metricAttachCalls: Array<[unknown, unknown]> = [];
   const hostPrototype = DiscordHost.prototype as typeof DiscordHost.prototype & {
     attachCompactServices(commands: unknown, agents: unknown): boolean;
+    attachContextMetricServices(sessions: unknown, sessionProjections: unknown): boolean;
   };
   const originalAttach = hostPrototype.attachCompactServices;
+  const originalMetricsAttach = hostPrototype.attachContextMetricServices;
   const originalBoot = DiscordHost.prototype.boot;
   hostPrototype.attachCompactServices = function (nextCommands: unknown, nextAgents: unknown) {
     attachCalls.push([nextCommands, nextAgents]);
     return originalAttach.call(this, nextCommands, nextAgents);
+  };
+  hostPrototype.attachContextMetricServices = function (nextSessions: unknown, nextProjections: unknown) {
+    metricAttachCalls.push([nextSessions, nextProjections]);
+    return originalMetricsAttach.call(this, nextSessions, nextProjections);
   };
   DiscordHost.prototype.boot = async function () {};
   let pluginFiber: Awaited<ReturnType<typeof context.plugin>> | undefined;
@@ -156,6 +188,8 @@ test('Cordis optional services attach, withdraw, reprovide, and dispose through 
     pluginFiber = await context.plugin({ name: 'synthetic-discord-host', inject: requiredDiscordServices, apply: applyDiscordPlugin }, { dataRoot: root });
     assert.equal(attachCalls.length, 1);
     assert.strictEqual(attachCalls[0]![0], commands); assert.strictEqual(attachCalls[0]![1], agents);
+    assert.equal(metricAttachCalls.length, 1);
+    assert.strictEqual(metricAttachCalls[0]![0], sessions); assert.strictEqual(metricAttachCalls[0]![1], sessionProjections);
 
     await disposers[3]!();
     assert.deepEqual(attachCalls.at(-1), [undefined, undefined]);
@@ -166,14 +200,25 @@ test('Cordis optional services attach, withdraw, reprovide, and dispose through 
     assert.deepEqual(attachCalls.at(-1), [undefined, undefined]);
     disposers[2] = await context.provide('commands', commands);
     assert.strictEqual(attachCalls.at(-1)?.[0], commands); assert.strictEqual(attachCalls.at(-1)?.[1], agents);
+
+    await disposers[5]!();
+    assert.deepEqual(metricAttachCalls.at(-1), [undefined, undefined]);
+    disposers[5] = await context.provide('sessionProjections', sessionProjections);
+    assert.strictEqual(metricAttachCalls.at(-1)?.[0], sessions); assert.strictEqual(metricAttachCalls.at(-1)?.[1], sessionProjections);
+    await disposers[4]!();
+    assert.deepEqual(metricAttachCalls.at(-1), [undefined, undefined]);
+    disposers[4] = await context.provide('sessions', sessions);
+    assert.strictEqual(metricAttachCalls.at(-1)?.[0], sessions); assert.strictEqual(metricAttachCalls.at(-1)?.[1], sessionProjections);
     assert.deepEqual(requiredDiscordServices, ['connection', 'sessionController']);
   } finally {
     if (pluginFiber) await pluginFiber.dispose();
     for (const dispose of disposers.reverse()) await dispose();
     hostPrototype.attachCompactServices = originalAttach;
+    hostPrototype.attachContextMetricServices = originalMetricsAttach;
     DiscordHost.prototype.boot = originalBoot;
   }
   assert.deepEqual(attachCalls.at(-1), [undefined, undefined]);
+  assert.deepEqual(metricAttachCalls.at(-1), [undefined, undefined]);
 });
 
 test('slow notice delivery does not block connected management status', { timeout: 5000 }, async t => {

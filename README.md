@@ -128,9 +128,9 @@ tokenは送信時に入力欄から消えます。保存済みtokenを表示す�
 
 下記の未対応項目は、`/agent help topic:機能名` でも理由を確認できます。カタログ表示・タイトル変更・Run開始通知など実装済みの部分と、正式契約や実機検証が残る機能を分けています。
 
-- モデル選択・推論レベル変更、設定リセット、実際のcontext使用量・上限、Session全体の会話履歴。`/agent current` はNativeが返す直近リクエストmodelと次回設定を区別して表示しますが、現在実行中のmodelやcontext消費とは断定しません。
+- モデル選択・推論レベル変更、設定リセット、正確なcontext使用量・上限・直近Runのtoken使用量/費用、Session全体の会話履歴。`/agent context show` は選択Sessionに対するNativeの限定projection（pressure/forecast/window/heuristic breakdown）だけを表示し、同一時点・鮮度・実際の使用率は保証しません。`/agent current` はNativeが返す直近リクエストmodelと次回設定を区別し、実行中のmodelやcontext消費とは断定しません。
 - DMからの操作、通常メッセージの自動実行、途中経過の自動通知。
-- Run指定停止、リモート承認回答、共有Desktopとの原子的FIFO queue、任意ファイル・Artifact送信、通常chatは未対応です。Native Compactは `/agent compact confirm:true` または `/agent context compact confirm:true` から明示実行できます。対象Agent/Sessionの再確認、idle・queue確認、durable `unknown` と自動再送禁止を実装していますが、履歴を変更する可能性があり、実Native／Discordでの受け入れは未検証です。context使用量を測定・表示する機能ではありません。
+- Run指定停止、リモート承認回答、共有Desktopとの原子的FIFO queue、任意ファイル・Artifact送信、通常chatは未対応です。Native Compactは `/agent compact confirm:true` または `/agent context compact confirm:true` から明示実行できます。対象Agent/Sessionの再確認、idle・queue確認、durable `unknown` と自動再送禁止を実装していますが、履歴を変更する可能性があり、実Native／Discordでの受け入れは未検証です。`/agent context show` のprojectionも正確なcurrent usageではありません。
 
 `/agent models` はNative model catalogのread-only検索です。`/agent settings title value:<title> confirm-no-cas:true` は選択中の待機Sessionのタイトルを変更しreadbackを確認しますが、Native title CASがなくDesktopとの同時変更を保護できません。model/reasoning選択APIはHost既定も変更するため使いません。`/agent new` は作業フォルダー別名だけを受け付け、title/model/effort指定はできません。Native create自体は実行されてから新Sessionのmodern-page契約をprobeするため、probe失敗時は作成済みSessionが未bindで残る可能性があります。Telegramの追加開発も対象外です。
 

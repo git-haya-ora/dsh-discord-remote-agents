@@ -5,6 +5,16 @@ export interface CatalogGroup { id: string; name: string; models: CatalogModel[]
 // Safe Host DTO: raw provider failure messages are intentionally discarded by the adapter.
 export interface ModelCatalog { default: SessionModel; routableProviders: string[]; groups: CatalogGroup[]; failedProviders: number }
 export interface SessionRenameValue { title: string; seq: number }
+/** Read-only, selected Native context projections; these values are not one atomic usage sample. */
+export interface ContextMetrics {
+  readonly pressureTokens?: number;
+  readonly projectedTokens?: number;
+  readonly contextWindow?: number;
+  readonly systemTokens?: number;
+  readonly toolsTokens?: number;
+  readonly messageTokens?: number;
+  readonly asOfSeq?: number;
+}
 export type CompactMaintenanceState = 'unknown' | 'completed' | 'noop';
 /** Local no-replay journal only; it never asserts Native history text was erased. */
 export interface CompactMaintenanceIntent {
@@ -88,6 +98,7 @@ export interface AgentAdapter {
   prompt(sessionId: string, requestId: string, text: string): Promise<void>;
   modelCatalog?(): Promise<ModelCatalog>;
   rename?(request: { sessionId: string; title: string }): Promise<SessionRenameValue>;
+  contextMetrics?(sessionId: string, cwd: string): ContextMetrics | undefined;
   verifySession?(sessionId: string): Promise<void>;
   prepareCompactTarget?(sessionId: string, cwd: string): Promise<CompactTarget>;
   isCompactTargetCurrent?(target: CompactTarget): boolean;

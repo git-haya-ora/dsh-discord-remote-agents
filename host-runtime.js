@@ -118,7 +118,7 @@ export class DiscordHost {
     this.ctx = ctx; this.internals = internals;
     this.state = 'unconfigured'; this.lastError = ''; this.disposed = false; this.busy = false; this.bot = undefined; this.store = undefined; this.startGeneration = 0;
     this.settingsState = { profile, revision: 0, settings: null, secretRef: null, bot: null, retireRefs: [] };
-    this.nativeAbort = new AbortController(); this.lifecycleAbort = new AbortController(); this.compactAbort = new AbortController(); this.compactEngineAbort = new AbortController(); this.compactServices = undefined;
+    this.nativeAbort = new AbortController(); this.lifecycleAbort = new AbortController(); this.compactAbort = new AbortController(); this.compactEngineAbort = new AbortController(); this.compactServices = undefined; this.contextMetricServices = undefined;
     try {
       keys(config, ['dataRoot']);
       const root = config.dataRoot ?? (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'DSHDiscordRemoteAgents', profile) : undefined);
@@ -142,6 +142,13 @@ export class DiscordHost {
     this.compactServices = commands && agents ? { commands, agents } : undefined;
     if (this.adapter) this.adapter.attachCompactServices(commands, agents);
     return this.adapter ? this.adapter.commands !== undefined : !!(commands && agents);
+  }
+  attachContextMetricServices(sessions, sessionProjections) {
+    const liveSessions = sessions && typeof sessions.get === 'function' ? sessions : undefined;
+    const projections = sessionProjections && typeof sessionProjections.snapshot === 'function' ? sessionProjections : undefined;
+    this.contextMetricServices = liveSessions && projections ? { sessions: liveSessions, sessionProjections: projections } : undefined;
+    if (this.adapter) return this.adapter.attachContextMetricServices(liveSessions, projections);
+    return !!(liveSessions && projections);
   }
   async initialize() {
     if (this.disposed) fail('DISPOSED');
@@ -171,6 +178,7 @@ export class DiscordHost {
         this.store = store;
         this.adapter = new NativeSessionAdapter(this.ctx.sessionController, store, this.nativeAbort.signal,
           this.compactServices?.commands, this.compactServices?.agents);
+        this.adapter.attachContextMetricServices(this.contextMetricServices?.sessions, this.contextMetricServices?.sessionProjections);
         this.state = this.settingsState.settings ? 'stopped' : 'unconfigured';
         store.recoverDispatches();
         await this.retireOldSecrets();
@@ -312,7 +320,7 @@ export class DiscordHost {
     // Freeze the Host generation, but compose the current optional-service epoch per operation.
     const engineLifetimeSignal = this.compactEngineAbort.signal;
     const engineCompactSignal = () => AbortSignal.any([engineLifetimeSignal, this.compactAbort.signal]);
-    const engine = new Engine(this.adapter, this.store, policy, [candidate], true, this.protectedPayloadStore, { applicationId: settings.applicationId, botId: botIdentity.botId }, true, engineCompactSignal);
+    const engine = new Engine(this.adapter, this.store, policy, [candidate], true, this.protectedPayloadStore, { applicationId: settings.applicationId, botId: botIdentity.botId }, true, engineCompactSignal, engineLifetimeSignal);
     engine.registerWorkspace = async (actor, alias, path, confirmed) => {
       policy.authorize(actor.userId, actor.guildId, actor.channelId);
       if (!confirmed) fail('CONFIRMATION_REQUIRED');
@@ -376,6 +384,7 @@ export class DiscordHost {
   async dispose() {
     if (this.disposed) return;
     this.disposed = true; this.startGeneration++; this.lifecycleAbort.abort(); this.attachCompactServices(undefined, undefined);
+    this.attachContextMetricServices(undefined, undefined);
     // Await our in-flight management operation only; never cancel native Session agents.
     await Promise.allSettled([...(this.inFlight ?? [])]);
     await this.stop(); this.nativeAbort.abort();

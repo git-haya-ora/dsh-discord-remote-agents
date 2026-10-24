@@ -4,14 +4,62 @@ import { object, DshRejected } from './runtime/protocol.js';
 // Actual installed SessionController seam. No HTTP, DSH token, synthetic Run API or research import.
 const methods = ['list', 'create', 'projections', 'page', 'prompt'];
 const rejectedBeforeAdmission = new Set(['gateway/bad-request', 'session/not-found', 'session/writer-held', 'session/model-unavailable', 'session/invalid-time-zone']);
+const contextProjectionKeys = Object.freeze(['contextPressure', 'contextBreakdown']);
+function record(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined; }
+function ownValue(value, key) { return Object.hasOwn(value, key) ? value[key] : undefined; }
 function protocol() { throw new AppError('DSH_PROTOCOL', 'Native Sessionの応答形式が未対応です。PCで確認してください。'); }
 export class NativeSessionAdapter {
   constructor(controller, store, signal = new AbortController().signal, commands, agents) {
     if (!controller || methods.some(method => typeof controller[method] !== 'function')) throw new AppError('HOST_COMPATIBILITY_UNVERIFIED', '正式Native Session serviceが利用できません。');
     this.controller = controller; this.store = store; this.signal = signal; this.verifiedSessions = new Set();
     this.compactTargets = new WeakMap(); this.compactServiceGeneration = 0; this.attachCompactServices(commands, agents);
+    this.contextServiceGeneration = 0; this.liveSessions = undefined; this.sessionProjections = undefined;
   }
   invalidateCompactTargets() { this.compactServiceGeneration++; }
+  attachContextMetricServices(sessions, sessionProjections) {
+    this.contextServiceGeneration++;
+    this.liveSessions = sessions && typeof sessions.get === 'function' ? sessions : undefined;
+    this.sessionProjections = sessionProjections && typeof sessionProjections.snapshot === 'function' ? sessionProjections : undefined;
+    return !!(this.liveSessions && this.sessionProjections);
+  }
+  contextMetrics(sessionId, cwd) {
+    const sessions = this.liveSessions, projections = this.sessionProjections, generation = this.contextServiceGeneration;
+    const current = () => !this.signal.aborted && generation === this.contextServiceGeneration
+      && sessions === this.liveSessions && projections === this.sessionProjections;
+    if (!current() || !sessions || !projections || typeof sessionId !== 'string' || !sessionId || typeof cwd !== 'string' || !cwd) return undefined;
+    try {
+      const session = sessions.get(sessionId);
+      if (!current() || !session || typeof session !== 'object' || Array.isArray(session)) return undefined;
+      const header = record(session.header);
+      if (!header || ownValue(header, 'id') !== sessionId || ownValue(header, 'cwd') !== cwd) return undefined;
+      const snapshot = record(projections.snapshot(session, new Set(contextProjectionKeys)));
+      if (!current() || !snapshot) return undefined;
+      const values = record(ownValue(snapshot, 'values'));
+      if (!values) return undefined;
+      const metrics = {};
+      const pressure = record(ownValue(values, 'contextPressure'));
+      const breakdown = record(ownValue(values, 'contextBreakdown'));
+      const nonnegativeInteger = value => Number.isSafeInteger(value) && value >= 0;
+      if (pressure) {
+        for (const key of ['pressureTokens', 'projectedTokens']) {
+          const value = ownValue(pressure, key);
+          if (nonnegativeInteger(value)) metrics[key] = value;
+        }
+        const window = ownValue(pressure, 'contextWindow');
+        if (Number.isSafeInteger(window) && window > 0) metrics.contextWindow = window;
+      }
+      if (breakdown) {
+        for (const key of ['systemTokens', 'toolsTokens', 'messageTokens']) {
+          const value = ownValue(breakdown, key);
+          if (nonnegativeInteger(value)) metrics[key] = value;
+        }
+      }
+      const asOfSeq = ownValue(snapshot, 'asOfSeq');
+      if (Number.isSafeInteger(asOfSeq) && asOfSeq >= -1) metrics.asOfSeq = asOfSeq;
+      if (!current() || !Object.keys(metrics).some(key => key !== 'asOfSeq')) return undefined;
+      return Object.freeze(metrics);
+    } catch { return undefined; }
+  }
   attachCompactServices(commands, agents) {
     this.invalidateCompactTargets();
     this.commands = commands && typeof commands.find === 'function' && typeof commands.execute === 'function' ? commands : undefined;

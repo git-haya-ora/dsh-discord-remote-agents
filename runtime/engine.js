@@ -26,12 +26,13 @@ export class Engine {
     protectedIdentity;
     protectedOutputRequired;
     compactSignal;
+    contextMetricsSignal;
     ticking = false;
     protectedOutputLock = Promise.resolve();
     sessionMutations = new Set();
     protectedOutputFault;
     registerWorkspace;
-    constructor(adapter, store, policy, secrets = [], sharedDiscordBindings = false, protectedPayloadStore, protectedIdentity, protectedOutputRequired = false, compactSignal) {
+    constructor(adapter, store, policy, secrets = [], sharedDiscordBindings = false, protectedPayloadStore, protectedIdentity, protectedOutputRequired = false, compactSignal, contextMetricsSignal) {
         this.adapter = adapter;
         this.store = store;
         this.policy = policy;
@@ -41,6 +42,7 @@ export class Engine {
         this.protectedIdentity = protectedIdentity;
         this.protectedOutputRequired = protectedOutputRequired;
         this.compactSignal = compactSignal;
+        this.contextMetricsSignal = contextMetricsSignal;
         store.recoverDispatches();
         const persistedFault = store.setting('protected-output-blocked');
         if (persistedFault)
@@ -183,6 +185,36 @@ export class Engine {
         if (this.binding(actor) !== id || this.bindingVersion(actor) !== version)
             throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
         return { session, bindingVersion: version };
+    }
+    async contextMetrics(actor) {
+        const assertLifecycle = () => {
+            this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+            if (this.contextMetricsSignal?.aborted)
+                throw new AppError('CONTEXT_METRICS_UNAVAILABLE', 'このHost generationのcontext projectionは停止されています。');
+        };
+        assertLifecycle();
+        const sessionId = this.binding(actor), bindingVersion = this.bindingVersion(actor);
+        const assertCurrent = (expectedSessionId, expectedVersion) => {
+            assertLifecycle();
+            if (this.binding(actor) !== expectedSessionId || this.bindingVersion(actor) !== expectedVersion)
+                throw new AppError('BINDING_CONFLICT', 'Session選択が変更されました。もう一度実行してください。');
+        };
+        assertCurrent(sessionId, bindingVersion);
+        if (!sessionId)
+            return undefined;
+        const visibleSession = (await this.sessions(actor)).find(session => session.sessionId === sessionId);
+        assertCurrent(sessionId, bindingVersion);
+        if (!visibleSession || typeof visibleSession.cwd !== 'string')
+            return { sessionId };
+        let metrics;
+        try {
+            metrics = this.adapter.contextMetrics?.(sessionId, visibleSession.cwd);
+        }
+        catch {
+            metrics = undefined;
+        }
+        assertCurrent(sessionId, bindingVersion);
+        return { sessionId, ...(metrics ? { metrics } : {}) };
     }
     async bind(actor, sessionId, expectedVersion = this.bindingVersion(actor)) {
         this.policy.authorize(actor.userId, actor.guildId, actor.channelId);

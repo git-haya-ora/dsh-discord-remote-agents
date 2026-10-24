@@ -6,7 +6,7 @@
 
 1. A：一覧・現在対象・Run一覧・診断、read-only model catalog、明示no-CAS同意付きtitle rename、実Native start相関後の「作業中」通知を実装。filtered historyはfield-filtered契約がなく未登録。
 2. A：全文を順序付きpartへ分割する通知。Native相関・固定先・digest・各part状態・不明配送非再送を維持する。終端本文/partのDPAPI保護保存、readback、intent/quota、確定receipt後7日retentionとexact-ref cleanupを部分実装。90日metadata pruning、全process-kill/cross-process quota proof、official Native receipt、live acceptanceは未完了。
-3. A：model/reasoning mutationはHost既定も変更するNative APIのため無効。title renameはNative CASがなくDesktopとの競合を防げないため、明示同意・事前/事後Binding確認・readbackが必要でもfull AC-44/45保証ではない。context token/timingは真のcontext使用量として表示しない。
+3. A：model/reasoning mutationはHost既定も変更するNative APIのため無効。title renameはNative CASがなくDesktopとの競合を防げないため、明示同意・事前/事後Binding確認・readbackが必要でもfull AC-44/45保証ではない。`/agent context show` は2つの選択Native projectionから限定scalarを表示する部分対応であり、context token/timingを真の使用量やfreshな観測としては表示しない。
 4. B：DM-onlyは明示導入・受信の設計／実証対象。既存guild設定を自動移行せず、実Discord実証なしにDM受付を有効化しない。
 5. C：targeted stop・external approval・共有FIFO queue・添付/Artifact・通常chatは未対応。Native Compactは明示確認付きcommand、対象Agent/Session再確認、idle/queue guard、durable unknown/no-replayを実装したが、synthetic fixtureの成功を実Native／Discord受け入れとは扱わない。Telegram追加開発はしない。
 

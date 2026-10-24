@@ -4,7 +4,7 @@ import { DshRejected, object } from './protocol.js';
 import { assistantText, boundedOutput, redact, finalAssistantText, digest, splitFinalOutput } from './output.js';
 import { bindingKey, MAX_ACTIVE_RUN_METADATA_RESERVE, PROTECTED_OUTPUT_RETENTION_MS, Store } from './store.js';
 import { Policy } from './policy.js';
-import type { AgentAdapter, CompactExecution, CompactMaintenanceIntent, CompactMaintenanceState, CompactTarget, Run, SessionInfo, WireEvent, NotificationPreferences, DeliveryPart, BridgeOutputContext, ProtectedOutputIntent, ProtectedOutputItem, ProtectedPayloadStore } from './types.js';
+import type { AgentAdapter, CompactExecution, CompactMaintenanceIntent, CompactMaintenanceState, CompactTarget, ContextMetrics, Run, SessionInfo, WireEvent, NotificationPreferences, DeliveryPart, BridgeOutputContext, ProtectedOutputIntent, ProtectedOutputItem, ProtectedPayloadStore } from './types.js';
 import { terminal } from './types.js';
 export interface Actor { userId: string; guildId: string; channelId: string }
 export type Notify = (run: Run, part?: { index: number; content: string }) => Promise<void | { messageId: string }>;
@@ -28,7 +28,8 @@ export class Engine {
   private protectedOutputFault?: string;
   registerWorkspace?: (actor: Actor, alias: string, path: string, confirmed: boolean) => Promise<void>;
   constructor(readonly adapter: AgentAdapter, readonly store: Store, readonly policy: Policy, private readonly secrets: readonly string[] = [], readonly sharedDiscordBindings = false,
-    readonly protectedPayloadStore?: ProtectedPayloadStore, private readonly protectedIdentity?: ProtectedIdentity, readonly protectedOutputRequired = false, private readonly compactSignal?: AbortSignal | (() => AbortSignal)) {
+    readonly protectedPayloadStore?: ProtectedPayloadStore, private readonly protectedIdentity?: ProtectedIdentity, readonly protectedOutputRequired = false,
+    private readonly compactSignal?: AbortSignal | (() => AbortSignal), private readonly contextMetricsSignal?: AbortSignal) {
     store.recoverDispatches();
     const persistedFault = store.setting('protected-output-blocked');
     if (persistedFault) this.protectedOutputFault = /^[A-Z0-9_]{1,64}$/u.test(persistedFault) ? persistedFault : 'PROTECTED_OUTPUT_STATE_INVALID';
@@ -129,6 +130,28 @@ export class Engine {
     this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
     if (this.binding(actor) !== id || this.bindingVersion(actor) !== version) throw new AppError('BINDING_CONFLICT', '選択が変更されました。再確認してください。');
     return { session, bindingVersion: version };
+  }
+  async contextMetrics(actor: Actor): Promise<{ sessionId: string; metrics?: ContextMetrics } | undefined> {
+    const assertLifecycle = (): void => {
+      this.policy.authorize(actor.userId, actor.guildId, actor.channelId);
+      if (this.contextMetricsSignal?.aborted) throw new AppError('CONTEXT_METRICS_UNAVAILABLE', 'このHost generationのcontext projectionは停止されています。');
+    };
+    assertLifecycle();
+    const sessionId = this.binding(actor), bindingVersion = this.bindingVersion(actor);
+    const assertCurrent = (expectedSessionId: string | undefined, expectedVersion: number): void => {
+      assertLifecycle();
+      if (this.binding(actor) !== expectedSessionId || this.bindingVersion(actor) !== expectedVersion)
+        throw new AppError('BINDING_CONFLICT', 'Session選択が変更されました。もう一度実行してください。');
+    };
+    assertCurrent(sessionId, bindingVersion);
+    if (!sessionId) return undefined;
+    const visibleSession = (await this.sessions(actor)).find(session => session.sessionId === sessionId);
+    assertCurrent(sessionId, bindingVersion);
+    if (!visibleSession || typeof visibleSession.cwd !== 'string') return { sessionId };
+    let metrics: ContextMetrics | undefined;
+    try { metrics = this.adapter.contextMetrics?.(sessionId, visibleSession.cwd); } catch { metrics = undefined; }
+    assertCurrent(sessionId, bindingVersion);
+    return { sessionId, ...(metrics ? { metrics } : {}) };
   }
   async bind(actor: Actor, sessionId: string, expectedVersion = this.bindingVersion(actor)): Promise<void> {
     this.policy.authorize(actor.userId, actor.guildId, actor.channelId);

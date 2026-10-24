@@ -14,7 +14,8 @@ export const command = new SlashCommandBuilder().setName('agent').setDescription
     .addIntegerOption(o => o.setName('page').setDescription('ページ番号（1から）').setMinValue(1).setMaxValue(10000)))
     .addSubcommand(c => c.setName('compact').setDescription('Native contextを圧縮（履歴を変更する場合があります）')
     .addBooleanOption(o => o.setName('confirm').setDescription('実行と不明結果を再送しないことを確認').setRequired(true)))
-    .addSubcommandGroup(g => g.setName('context').setDescription('Native context操作')
+    .addSubcommandGroup(g => g.setName('context').setDescription('Native contextの確認・操作')
+    .addSubcommand(c => c.setName('show').setDescription('選択Sessionの限定Native projectionを表示'))
     .addSubcommand(c => c.setName('compact').setDescription('現在のSession contextをNativeで圧縮')
     .addBooleanOption(o => o.setName('confirm').setDescription('実行と不明結果を再送しないことを確認').setRequired(true))))
     .addSubcommand(c => c.setName('rename').setDescription('選択Sessionのtitleを変更（Native CASなし・実行中不可）')
@@ -62,12 +63,13 @@ export const command = new SlashCommandBuilder().setName('agent').setDescription
     .addBooleanOption(o => o.setName('confirm-duplicate-risk').setDescription('unknown配送の重複リスクを確認'))));
 export const HELP = `**DSH遠隔操作 — server-only**
 作業フォルダー未指定でも接続できます。接続後、/agent workspace-add alias:<別名> path:<PC上の絶対パス> confirm-access:true で既存フォルダーを許可し、/agent new workspace:<別名> または /agent sessions → /agent bind で作業先を選びます。登録は許可ユーザー・Guild・Channel限定で、既存別名は上書きしません。パスをコマンド引数としてDiscordに渡すため、秘密の文字列を含めないでください。
-使用可能: /agent current, /agent models, /agent compact confirm:true（/agent context compact confirm:trueも同じNative command）, /agent settings title value:<title>（/agent renameは互換alias）, /agent workspaces [page], /agent workspace-add, /agent sessions, /agent new, /agent bind, /agent unbind, /agent prompt, /agent status, /agent tasks, /agent result, /agent diagnose, /agent notifications show|set|retry, /agent notify（旧互換）。すべて許可ユーザー・Guild・Channelを毎回検査します。
-/agent currentは直近リクエストで使用されたmodelと次回設定modelを区別して表示します。Nativeが値を返さない場合は推測せず未取得とします。実行中modelの断定やcontext使用量は表示しません。
-/agent modelsはNative model catalogのprovider/modelと実在するmodel別reasoning effort候補を検索するread-only機能です。providerの失敗本文は表示しません。model選択・reasoning変更・/agent newのtitle/model/effort指定・settings resetは未対応です。selectModelはSession専用CAS/readbackの根拠がなくHost既定も変更するため使いません。
+使用可能: /agent current, /agent models, /agent context show, /agent compact confirm:true（/agent context compact confirm:trueも同じNative command）, /agent settings title value:<title>（/agent renameは互換alias）, /agent workspaces [page], /agent workspace-add, /agent sessions, /agent new, /agent bind, /agent unbind, /agent prompt, /agent status, /agent tasks, /agent result, /agent diagnose, /agent notifications show|set|retry, /agent notify（旧互換）。すべて許可ユーザー・Guild・Channelを毎回検査します。
+/agent currentは直近利用modelと次回設定modelを区別。実行中modelは断定しません。context showは限定projectionのみで、current usage/occupancy/costは不明です。
+/agent modelsはNative model/reasoning候補をread-only検索。provider失敗は非表示。model/reasoning変更、/agent newのtitle/model/effort、settings resetは未対応。selectModelはHost既定も変えるため無効です。
 /agent renameは選択中・待機中SessionのtitleをNativeで変更しreadbackを確認します。Native title CASはありません。結果不明時は自動再送しないでDSH GUIで確認してください。
-/agent historyは未登録です。Native sessionQuery.filterEventsは存在しますが、Bridgeにrole/outputの安全なwhitelistとbounded materializationがありません。reasoning/secretsを含むraw pageを後から絞る代替は行いません。Bridgeの最終回答は/agent resultで確認してください。
-/agent context compactはNative commandを明示実行します。成功とno-opだけを簡潔に返し、結果不明は自動再送しません。未解決の結果はその完全なSessionだけに永続的なprompt/bind/title変更停止を適用し、このBridgeから解除・再送はできません。DSH GUIで確認してください。contextの実測値・上限・使用率は未対応です。通知先変更は今後のRunだけに適用され、origin公開には表示scopeでの明示確認が必要です。unknown通知は重複リスクを明示確認しない限り再試行できません。進捗通知は未対応で最終回答のみです。
+/agent historyは未登録。raw pageを後からfilterせず、最終回答は/agent resultで確認してください。
+/agent context showはNative projectionの限定値のみ。aggregatesは非atomic、asOfSeqはfold cursor。sample鮮度やcurrent usage・occupancy・percent・costは不明。0も新鮮さを示しません。windowはlast-request、breakdownはheuristicです。
+/agent context compactはNative commandを確認実行します。unknownは再送せず、該当Sessionだけprompt/bind/titleを停止。解除はDSH GUIで確認してください。通知先変更は今後のRunだけに適用され、origin公開は明示確認が必要です。unknown通知は重複リスクを確認しない限り再試行できません。進捗通知は未対応で最終回答のみです。
 C機能（targeted stop、approval、bridge FIFO queue、attachments/artifacts、chat enable）は未登録・無効です。DM-only操作は設計・実証待ちで、DMからのコマンドは無効です。通常DM本文を実行しません。DSH GUIで停止・承認を確認してください。
 通知は実行状態と別管理です。結果は/agent resultでページごとに確認できます。DSHのOS権限が適用されます。`;
 //# sourceMappingURL=commands.js.map

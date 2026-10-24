@@ -10,7 +10,7 @@ import { bindingKey, Store } from '../src/store.js';
 import { Policy } from '../src/policy.js';
 import { AppError } from '../src/errors.js';
 import type { Config } from '../src/config.js';
-import type { AgentAdapter, ModelCatalog, SessionInfo, SessionRenameValue, Snapshot, WireEvent } from '../src/types.js';
+import type { AgentAdapter, ContextMetrics, ModelCatalog, SessionInfo, SessionRenameValue, Snapshot, WireEvent } from '../src/types.js';
 const actor: Actor = { userId: '111111111111111111', guildId: '222222222222222222', channelId: '333333333333333333' };
 function interaction(sub: string, values: Record<string, string | number | boolean> = {}, group: string | null = null, changes: Partial<Actor> = {}): ChatInputCommandInteraction {
   return { commandName: 'agent', id: 'extended-run', user: { id: changes.userId ?? actor.userId, bot: false }, guildId: changes.guildId ?? actor.guildId, channelId: changes.channelId ?? actor.channelId,
@@ -21,6 +21,10 @@ function interaction(sub: string, values: Record<string, string | number | boole
 class Adapter implements AgentAdapter {
   rows: SessionInfo[] = [{ sessionId: 'native-session', title: '日本語😀', cwd: process.cwd(), running: false, subagent: false, updatedAt: 1 }];
   listCalls = 0; creates = 0; prompts = 0; catalogCalls = 0; snapshotCalls = 0; renameCalls: Array<{ sessionId: string; title: string }> = []; log: WireEvent[] = []; revoke: (() => void) | undefined;
+  contextMetricsValue: ContextMetrics | undefined;
+  contextMetricsCalls: Array<{ sessionId: string; cwd: string }> = [];
+  verifySession?: (sessionId: string) => Promise<void>;
+  onContextMetrics: (() => void) | undefined;
   inbox: Record<string, unknown> = { 'next-turn': [], 'next-step': [] };
   catalog: ModelCatalog = { default: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'medium' }, routableProviders: ['provider-a'],
     groups: [{ id: 'provider-a', name: 'Provider A', models: [{ id: 'model-a', name: 'Model A', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }], defaultEffort: 'medium' } }] }], failedProviders: 1 };
@@ -28,6 +32,9 @@ class Adapter implements AgentAdapter {
   async create(): Promise<string> { this.creates++; return 'new'; }
   async prompt(): Promise<void> { this.prompts++; }
   async modelCatalog(): Promise<ModelCatalog> { this.catalogCalls++; return this.catalog; }
+  contextMetrics(sessionId: string, cwd: string): ContextMetrics | undefined {
+    this.contextMetricsCalls.push({ sessionId, cwd }); this.onContextMetrics?.(); return this.contextMetricsValue;
+  }
   async rename(request: { sessionId: string; title: string }): Promise<SessionRenameValue> {
     this.renameCalls.push(request); const row = this.rows.find(value => value.sessionId === request.sessionId);
     if (!row) throw new AppError('SESSION_NOT_FOUND', 'not found'); row.title = request.title;
@@ -62,6 +69,88 @@ test('wrong channel/user/guild and unsupported context produce no Native effects
   await assert.rejects(handleAgentCommand(interaction('context'), engine, config, true), { code: 'UNKNOWN_COMMAND' });
   assert.equal(adapter.listCalls, before); assert.equal(adapter.creates, 0); assert.equal(adapter.prompts, 0);
 });
+test('/agent context show labels zero projections without claiming a fresh sample', async t => {
+  const { engine, adapter, config } = await setup(t);
+  adapter.contextMetricsValue = { pressureTokens: 0, projectedTokens: 0, contextWindow: 4096, systemTokens: 0, toolsTokens: 0, messageTokens: 0, asOfSeq: 0 };
+  const response = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(response.content, /Prompt-side pressure.*0 tokens/u);
+  assert.match(response.content, /Next-request forecast.*0 tokens/u);
+  assert.match(response.content, /0もsampleの存在や鮮度を証明しません/u);
+  assert.match(response.content, /実際のoccupancy\/使用率・currentness・費用は推測しません/u);
+  assert.doesNotMatch(response.content, /100%|fresh sample confirmed/iu);
+  assert.deepEqual(adapter.contextMetricsCalls, [{ sessionId: 'native-session', cwd: process.cwd() }]);
+  assert.equal(response.content.includes(process.cwd()), false);
+});
+
+test('/agent context show avoids the broader Session verifier and makes one authorized list observation', async t => {
+  const { engine, adapter, config } = await setup(t);
+  let verifierCalls = 0;
+  adapter.verifySession = async () => { verifierCalls++; };
+  adapter.contextMetricsValue = { pressureTokens: 4 };
+  const beforeLists = adapter.listCalls;
+  const response = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(response.content, /Prompt-side pressure.*4 tokens/u);
+  assert.equal(adapter.listCalls - beforeLists, 1);
+  assert.equal(verifierCalls, 0);
+  assert.deepEqual(adapter.contextMetricsCalls, [{ sessionId: 'native-session', cwd: process.cwd() }]);
+});
+
+test('/agent context show keeps forecast, last-request window, heuristic breakdown and fold cursor distinct', async t => {
+  const { engine, adapter, config } = await setup(t);
+  adapter.contextMetricsValue = { pressureTokens: 1024, projectedTokens: 8192, contextWindow: 4096, systemTokens: 100, toolsTokens: 200, messageTokens: 724, asOfSeq: 4 };
+  const first = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(first.content, /Prompt-side pressure.*1,024 tokens/u);
+  assert.match(first.content, /Next-request forecast.*8,192 tokens/u);
+  assert.match(first.content, /Last-request context window.*4,096 tokens/u);
+  assert.match(first.content, /Heuristic system tokens.*100 tokens/u);
+  assert.match(first.content, /Fold cursor \(asOfSeq\): 4.*測定時刻/u);
+  assert.match(first.content, /同一requestのatomicな観測ではありません/u);
+  assert.doesNotMatch(first.content, /\d+%/u);
+
+  adapter.contextMetricsValue = { pressureTokens: 1024, projectedTokens: 512, contextWindow: 4096, systemTokens: 100, toolsTokens: 200, messageTokens: 724, asOfSeq: 99 };
+  const afterCompaction = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(afterCompaction.content, /Prompt-side pressure.*1,024 tokens/u);
+  assert.match(afterCompaction.content, /Next-request forecast.*512 tokens/u);
+  assert.match(afterCompaction.content, /Fold cursor \(asOfSeq\): 99.*測定時刻/u);
+  assert.equal(adapter.contextMetricsCalls.length, 2);
+  assert.equal(adapter.contextMetricsCalls.every(call => call.sessionId === 'native-session' && call.cwd === process.cwd()), true);
+  assert.equal(first.content.includes(process.cwd()), false);
+  assert.equal(afterCompaction.content.includes(process.cwd()), false);
+});
+
+test('/agent context show does not treat an unrelated fold cursor advance as a fresh sample', async t => {
+  const { engine, adapter, config } = await setup(t);
+  adapter.contextMetricsValue = { pressureTokens: 512, projectedTokens: 700, contextWindow: 4096, systemTokens: 50, toolsTokens: 75, messageTokens: 387, asOfSeq: 11 };
+  const before = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  adapter.contextMetricsValue = { pressureTokens: 512, projectedTokens: 700, contextWindow: 4096, systemTokens: 50, toolsTokens: 75, messageTokens: 387, asOfSeq: 12 };
+  const afterUnrelatedEvent = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(before.content, /Fold cursor \(asOfSeq\): 11.*測定時刻/u);
+  assert.match(afterUnrelatedEvent.content, /Fold cursor \(asOfSeq\): 12.*測定時刻/u);
+  assert.match(afterUnrelatedEvent.content, /同一requestのatomicな観測ではありません/u);
+  assert.match(afterUnrelatedEvent.content, /0もsampleの存在や鮮度を証明しません/u);
+  assert.equal(adapter.contextMetricsCalls.length, 2);
+  assert.equal(afterUnrelatedEvent.content.includes(process.cwd()), false);
+});
+
+test('/agent context show authorizes first and fails closed if authorization or Binding changes', async t => {
+  const unauthorized = await setup(t);
+  const beforeUnauthorized = unauthorized.adapter.listCalls;
+  await assert.rejects(handleAgentCommand(interaction('show', {}, 'context', { userId: '999999999999999999' }), unauthorized.engine, unauthorized.config, true), { code: 'NOT_AUTHORIZED' });
+  assert.equal(unauthorized.adapter.listCalls, beforeUnauthorized);
+  assert.equal(unauthorized.adapter.contextMetricsCalls.length, 0);
+
+  const revoked = await setup(t);
+  revoked.adapter.revoke = () => revoked.config.allowedUserIds.delete(actor.userId);
+  await assert.rejects(handleAgentCommand(interaction('show', {}, 'context'), revoked.engine, revoked.config, true), { code: 'NOT_AUTHORIZED' });
+  assert.equal(revoked.adapter.contextMetricsCalls.length, 0);
+
+  const changed = await setup(t);
+  changed.adapter.contextMetricsValue = { pressureTokens: 5 };
+  changed.adapter.onContextMetrics = () => changed.store.bind(bindingKey(actor.guildId, actor.channelId, 'shared'), 'other-native-session', changed.engine.bindingVersion(actor), true);
+  await assert.rejects(handleAgentCommand(interaction('show', {}, 'context'), changed.engine, changed.config, true), { code: 'BINDING_CONFLICT' });
+  assert.deepEqual(changed.adapter.contextMetricsCalls, [{ sessionId: 'native-session', cwd: process.cwd() }]);
+});
+
 test('command origin preferences require scoped consent and affect only future Run', async t => {
   const { engine, adapter, store, config } = await setup(t); await engine.submit(actor, 'earlier', 'earlier prompt');
   await assert.rejects(handleAgentCommand(interaction('set', { destination: 'origin' }, 'notifications'), engine, config, true), { code: 'CONFIRMATION_REQUIRED' });

@@ -54,6 +54,22 @@ export function apply(ctx, config = {}) {
         });
       });
     } catch { /* Compact remains unavailable; core Host startup is unaffected. */ }
+    // Context metrics are a separate optional, read-only feature. Keep them out of
+    // the required injection and compact-service lifecycle.
+    let contextMetricServiceGeneration = 0;
+    try {
+      ctx.inject(['sessions', 'sessionProjections'], services => {
+        const generation = ++contextMetricServiceGeneration;
+        host.attachContextMetricServices(services.sessions, services.sessionProjections);
+        services.effect(() => () => {
+          if (generation !== contextMetricServiceGeneration) return;
+          contextMetricServiceGeneration++;
+          host.attachContextMetricServices(undefined, undefined);
+        });
+      });
+    } catch {
+      contextMetricServiceGeneration++; host.attachContextMetricServices(undefined, undefined);
+    }
   }
   // This exact route is reachable only through the official /api carrier, which
   // performs Host/Origin and browser-session admission BEFORE dispatching routes.
