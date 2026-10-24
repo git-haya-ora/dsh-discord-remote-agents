@@ -378,7 +378,8 @@ export class DiscordHost {
     if (bot.applicationId !== settings.applicationId || bot.botId !== this.settingsState.bot?.botId) fail('BOT_IDENTITY_MISMATCH');
     const definition = command.toJSON();
     const bind = definition.options?.find(option => option.name === 'bind'); if (bind) bind.description = '既存セッションをこのチャンネルの共有先に選択';
-    try { await discordRequest(this.internals.fetcher ?? fetch, candidate, `/applications/${settings.applicationId}/guilds/${settings.guildId}/commands`, { method: 'PUT', body: JSON.stringify([definition]) }, signal); }
+    // Upsert /agent only. Bulk PUT would delete other commands owned by this application.
+    try { await discordRequest(this.internals.fetcher ?? fetch, candidate, `/applications/${settings.applicationId}/guilds/${settings.guildId}/commands`, { method: 'POST', body: JSON.stringify(definition) }, signal); }
     catch { fail('COMMAND_REGISTRATION_UNKNOWN'); }
   }
   async dispose() {

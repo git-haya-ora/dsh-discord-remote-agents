@@ -117,6 +117,48 @@ test('command schema stays within Discord option limits and registers only verif
   assert.equal(allNames.includes('progress'), false);
 });
 
+test('basic Discord workflow creates, selects and submits once even for a repeated interaction', async t => {
+  const { engine, config, adapter, store } = await setup(t);
+  assert.match((await handleAgentCommand(interaction('help', { topic: 'start' }), engine, config, true)).content, /sessions.*bind.*prompt.*status.*result/u);
+  await handleAgentCommand(interaction('unbind'), engine, config, true);
+  assert.equal(engine.binding(actor), undefined);
+  assert.match((await handleAgentCommand(interaction('new', { workspace: 'test' }), engine, config, true)).content, /Session ID: created/u);
+  assert.equal(engine.binding(actor), 'created');
+  assert.equal(adapter.createCalls, 1);
+  assert.match((await handleAgentCommand(interaction('sessions'), engine, config, true)).content, /old-session-id/u);
+  await handleAgentCommand(interaction('bind', { session: 'old-session-id' }), engine, config, true);
+  assert.equal(engine.binding(actor), 'old-session-id');
+  const prompt = interaction('prompt', { text: 'synthetic instruction' });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.match((await handleAgentCommand(prompt, engine, config, true)).content, /DSH受付済み/u);
+  }
+  assert.equal(adapter.promptCalls, 1);
+  assert.equal(store.allRuns().length, 1);
+  assert.match((await handleAgentCommand(interaction('status'), engine, config, true)).content, /interaction-111/u);
+  const result = await handleAgentCommand(interaction('result'), engine, config, true);
+  assert.ok(result.content.length > 0 && result.content.length <= 2000);
+  assert.equal(adapter.promptCalls, 1);
+});
+
+test('invite help uses the configured application/Guild and exact requested permissions without Native calls', async t => {
+  const { engine, config, adapter } = await setup(t);
+  const before = adapter.listCalls;
+  const response = await handleAgentCommand(interaction('help', { topic: 'invite' }), engine, config, true);
+  const url = new URL(response.content.split('\n')[1]!);
+  assert.equal(url.origin, 'https://discord.com');
+  assert.equal(url.pathname, '/oauth2/authorize');
+  assert.equal(url.searchParams.get('client_id'), config.applicationId);
+  assert.equal(url.searchParams.get('guild_id'), config.guildId);
+  assert.equal(url.searchParams.get('disable_guild_select'), 'true');
+  assert.equal(url.searchParams.get('scope'), 'bot applications.commands');
+  assert.equal(url.searchParams.get('permissions'), '563156112238656');
+  assert.match(response.content, /招待権限と操作の認可は別/u);
+  assert.equal(response.content.includes(config.token), false);
+  assert.equal(adapter.listCalls, before);
+  assert.equal(adapter.promptCalls, 0);
+  await assert.rejects(handleAgentCommand(interaction('help', { topic: 'invite' }, { userId: '999999999999999999' }), engine, config, true), { code: 'NOT_AUTHORIZED' });
+});
+
 test('workspace registration requires authorization, confirmation and a supported Host callback', async t => {
   const { engine, config } = await setup(t);
   const inputs = { alias: 'project', path: '/synthetic/project', 'confirm-access': true };

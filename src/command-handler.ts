@@ -194,8 +194,14 @@ async function revalidateCurrentSession(engine: Engine, actor: Actor, sessionId:
   return session;
 }
 
-function helpFor(topic: string | null): string {
+function helpFor(topic: string | null, config: Config): string {
   const normalized = topic?.trim().toLocaleLowerCase('en-US');
+  if (normalized === 'invite') {
+    const params = new URLSearchParams({ client_id: config.applicationId, guild_id: config.guildId,
+      disable_guild_select: 'true', scope: 'bot applications.commands', permissions: '563156112238656' });
+    return `設定済みサーバーへのBot招待（ブラウザーで内容を確認してください）\nhttps://discord.com/oauth2/authorize?${params}\n招待権限と操作の認可は別です。許可User/Guild/Channelの設定は引き続き必要です。コマンド登録はDSHのplugin設定から明示実行してください。`;
+  }
+  if (normalized === 'start') return '基本操作: /agent sessions → /agent bind session:<完全なID> → /agent prompt text:<指示> → /agent status → /agent result。新規作成は /agent workspaces → /agent new workspace:<別名>。選択確認は /agent current、解除は /agent unbind（Sessionや実行は削除しません）。結果不明（unknown）の指示は再送せず、DSH GUIで確認してください。';
   if (!normalized) return HELP;
   const unavailable: Record<string, string> = {
     model: 'model選択は未対応です。/agent modelsはread-only catalog、/agent currentは直近要求と次回設定を表示します。selectModelはHost既定も変更し、Session専用CAS/readbackがないため実行しません。',
@@ -302,7 +308,7 @@ export async function handleAgentCommand(
 
   switch (sub) {
     case 'help':
-      return { content: helpFor(interaction.options.getString('topic')) };
+      return { content: helpFor(interaction.options.getString('topic'), config) };
     case 'models': {
       const adapter = engine.adapter;
       if (typeof adapter.modelCatalog !== 'function') throw new AppError('MODEL_CATALOG_UNAVAILABLE', 'Native model catalogは利用できません。');

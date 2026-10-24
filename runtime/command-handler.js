@@ -200,8 +200,15 @@ async function revalidateCurrentSession(engine, actor, sessionId, bindingVersion
     }
     return session;
 }
-function helpFor(topic) {
+function helpFor(topic, config) {
     const normalized = topic?.trim().toLocaleLowerCase('en-US');
+    if (normalized === 'invite') {
+        const params = new URLSearchParams({ client_id: config.applicationId, guild_id: config.guildId,
+            disable_guild_select: 'true', scope: 'bot applications.commands', permissions: '563156112238656' });
+        return `設定済みサーバーへのBot招待（ブラウザーで内容を確認してください）\nhttps://discord.com/oauth2/authorize?${params}\n招待権限と操作の認可は別です。許可User/Guild/Channelの設定は引き続き必要です。コマンド登録はDSHのplugin設定から明示実行してください。`;
+    }
+    if (normalized === 'start')
+        return '基本操作: /agent sessions → /agent bind session:<完全なID> → /agent prompt text:<指示> → /agent status → /agent result。新規作成は /agent workspaces → /agent new workspace:<別名>。選択確認は /agent current、解除は /agent unbind（Sessionや実行は削除しません）。結果不明（unknown）の指示は再送せず、DSH GUIで確認してください。';
     if (!normalized)
         return HELP;
     const unavailable = {
@@ -316,7 +323,7 @@ export async function handleAgentCommand(interaction, engine, config, textOnly) 
         throw new AppError('UNKNOWN_COMMAND', '未対応のcontext操作です。');
     switch (sub) {
         case 'help':
-            return { content: helpFor(interaction.options.getString('topic')) };
+            return { content: helpFor(interaction.options.getString('topic'), config) };
         case 'models': {
             const adapter = engine.adapter;
             if (typeof adapter.modelCatalog !== 'function')

@@ -6,7 +6,7 @@ import { SlashCommandBuilder } from 'discord.js';
  */
 export const command = new SlashCommandBuilder().setName('agent').setDescription('許可済みDSH Sessionを安全に確認・操作')
     .setDMPermission(false)
-    .addSubcommand(c => c.setName('help').setDescription('使用可能な操作と未対応機能の理由').addStringOption(o => o.setName('topic').setDescription('説明する機能（models/model/reasoning/settings/context等）').setMaxLength(32)))
+    .addSubcommand(c => c.setName('help').setDescription('使用可能な操作と未対応機能の理由').addStringOption(o => o.setName('topic').setDescription('説明する機能（start/invite/models/settings/context等）').setMaxLength(32)))
     .addSubcommand(c => c.setName('current').setDescription('現在のSessionと確認可能な設定を表示'))
     .addSubcommand(c => c.setName('models').setDescription('Nativeが広告する利用可能model catalogを検索')
     .addStringOption(o => o.setName('provider').setDescription('provider IDまたは表示名').setMaxLength(100))

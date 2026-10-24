@@ -33,17 +33,25 @@ DSHのplugin設定を、**設定を保存 → Discordにコマンドを追加 �
 
 「IDをコピー」がなければ、Discordの **ユーザー設定 → 詳細設定 → 開発者モード** を有効にします。Botはあらかじめ自分のサーバーへ招待してください（scopeは `bot` と `applications.commands`、管理者権限・Message Content intentは不要）。
 
+招待時の Permissions Integer は指定値 **`563156112238656`** を使用します。以下の `APPLICATION_ID` と `GUILD_ID` を自分の値に置き換え、ブラウザーで権限を確認して招待します。tokenはURLへ入れません。
+
+```text
+https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&guild_id=GUILD_ID&disable_guild_select=true&scope=bot%20applications.commands&permissions=563156112238656
+```
+
+この指定値は最小権限ではなく、メッセージ管理なども含みます。一方、`View Channel` は含まないため、対象チャンネルをBotが閲覧できることをロール／チャンネル設定で確認してください。Botの招待権限は操作ユーザーの認可とは別で、許可User/Guild/Channelの設定は必要です。接続後は `/agent help topic:invite` でも設定済みIDの招待URLを確認できます。
+
 **保存時にもBotを確認するので、別のtokenテストは必須ではありません。** token欄は送信時に空になります。保存済みtokenの読み戻しはなく、空欄での保存は既存tokenを維持します。チャットへ貼ったtokenは使わないでください。
 
 ## 3. Discordに追加して接続する
 
-1. 内容を確認して、画面の **コマンド登録** を実行します。初回やcommand更新時に行う操作です。再読込後に登録済み表示がなくても、未登録と断定したものではありません。
+1. 内容を確認して、画面の **コマンド登録** を実行します。初回やcommand更新時に行う操作です。設定サーバーの `/agent` だけを追加・更新し、他のコマンドは削除しません。保存・接続・build/testでは自動登録しません。再読込後に登録済み表示がなくても、未登録と断定したものではありません。
 2. 旧CLIや別receiverを止めたこと、同じSessionへPCとDiscordから同時送信しないことを確認して、**開始**します。
 3. 状態が接続済みになったことを確認します。保存だけでは接続しません。自動起動などは「詳細設定」にあり、初回は変更不要です。
 
 ## 普段はDiscordでこの3操作
 
-Botを許可したチャンネルで実行します。`ID`と`指示`は実際の内容に置き換えてください。
+Botを許可したチャンネルで実行します。`ID`と`指示`は実際の内容に置き換えてください。短い操作案内は `/agent help topic:start` で表示できます。
 
 1. **選ぶ**：`/agent sessions` で一覧を見て、`/agent bind session:ID` で続けたいSessionを選択。
 2. **頼む**：`/agent prompt text:指示` で送信。

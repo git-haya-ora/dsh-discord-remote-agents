@@ -16,6 +16,9 @@ async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => 
   const store = new Store(':memory:', true), secrets = new Map<string, string>();
   let creates = 0, receiverCreates = 0, receiverStops = 0, failRetire = false;
   let currentEngine: Engine | undefined; let noticeCalls = 0;
+  const commandRequests: Array<{ url: string; method: string | undefined; body: unknown }> = [];
+  const discordCommands = new Map<string, unknown>([['unrelated', { name: 'unrelated' }]]);
+  let registrationFailure = false;
   const ctx = { effect() {}, connection: { fetch: { register() { return () => {}; } } }, sessionController: {
     async list() { return { items: [] }; }, async create() {}, async page() {}, async projections() {}, async prompt() {}
   } };
@@ -30,13 +33,56 @@ async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => 
       async estimate() { return []; }, async createWithRef() {}, async createManyWithRefs() {}, async read() { return { text: '' }; },
       async readMany() { return []; }, async stats() { return { bytes: 0, files: [] }; }, async delete() {}, async deleteMany(refs: string[]) { return refs.map(ref => ({ ref, deleted: false, bytes: 0 })); }
     },
-    fetcher: async (url: string) => new Response(JSON.stringify(url.endsWith('/users/@me') ? { id: applicationId, username: 'fixture', bot: true } : { id: applicationId, bot: { id: applicationId } }), { status: 200 }),
+    fetcher: async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/commands')) {
+        const body = JSON.parse(String(init?.body)) as { name?: string };
+        commandRequests.push({ url, method: init?.method, body });
+        if (registrationFailure) throw new Error('synthetic offline');
+        if (init?.method === 'PUT') discordCommands.clear();
+        if (typeof body.name === 'string') discordCommands.set(body.name, body);
+        return new Response(JSON.stringify(body), { status: 200 });
+      }
+      return new Response(JSON.stringify(url.endsWith('/users/@me') ? { id: applicationId, username: 'fixture', bot: true } : { id: applicationId, bot: { id: applicationId } }), { status: 200 });
+    },
     createBot: (_config: unknown, engine: Engine) => { currentEngine = engine; receiverCreates++; let ready = false; return { client: { isReady: () => ready }, async start() { ready = true; }, async notifyConnected() { noticeCalls++; assert.equal(host.status().state, 'connected'); return noticeGate ?? { sent: noticeFailure ? 0 : 1, failed: noticeFailure ? 1 : 0 }; }, async stop() { ready = false; receiverStops++; } }; }
   });
   const settings = { guildId, applicationId, allowedUserIds: ['111111111111111111'], allowedChannelIds: ['333333333333333333'], workspaces: { fixture: root }, autoStart: false };
   t.after(async () => { await host.dispose(); await rm(root, { recursive: true, force: true }); });
-  return { host, ctx, store, secrets, settings, noticeCalls: () => noticeCalls, engine: () => { assert.ok(currentEngine); return currentEngine; }, counts: () => ({ creates, receiverCreates, receiverStops }), failRetirement: () => { failRetire = true; } };
+  return { host, ctx, store, secrets, settings, commandRequests, discordCommands, failRegistration: () => { registrationFailure = true; }, noticeCalls: () => noticeCalls, engine: () => { assert.ok(currentEngine); return currentEngine; }, counts: () => ({ creates, receiverCreates, receiverStops }), failRetirement: () => { failRetire = true; } };
 }
+test('explicit command registration upserts only /agent in the configured Guild', async t => {
+  const f = await setup(t);
+  assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings: f.settings, token: syntheticToken })).ok, true);
+  assert.equal(f.commandRequests.length, 0); // Saving never registers or starts the receiver.
+  assert.equal((await f.host.dispatch({ operation: 'registerCommands', expectedRevision: 1, confirmation: false })).ok, false);
+  assert.equal((await f.host.dispatch({ operation: 'registerCommands', expectedRevision: 0, confirmation: true })).ok, false);
+  assert.equal(f.commandRequests.length, 0);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.equal((await f.host.dispatch({ operation: 'registerCommands', expectedRevision: 1, confirmation: true })).ok, true);
+    const request = f.commandRequests[attempt]!;
+    assert.equal(request.url, `https://discord.com/api/v10/applications/${applicationId}/guilds/${guildId}/commands`);
+    assert.equal(request.method, 'POST');
+    const definition = request.body as { name: string; dm_permission: boolean; options: Array<{ name: string }> };
+    assert.equal(definition.name, 'agent');
+    assert.equal(definition.dm_permission, false);
+    for (const name of ['help', 'sessions', 'new', 'bind', 'prompt', 'status', 'result']) assert.ok(definition.options.some(option => option.name === name));
+    assert.equal(f.discordCommands.has('unrelated'), true);
+    assert.equal(f.discordCommands.size, 2);
+  }
+  assert.equal(f.counts().receiverCreates, 0);
+});
+
+test('uncertain command registration is not automatically retried or connected', async t => {
+  const f = await setup(t);
+  assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings: f.settings, token: syntheticToken })).ok, true);
+  f.failRegistration();
+  const result = await f.host.dispatch({ operation: 'registerCommands', expectedRevision: 1, confirmation: true });
+  assert.equal(result.ok, false);
+  assert.match(JSON.stringify(result), /COMMAND_REGISTRATION_UNKNOWN/u);
+  assert.equal(f.commandRequests.length, 1);
+  assert.equal(f.counts().receiverCreates, 0);
+});
+
 test('Native Compact services are optional; their absence preserves base Host startup', async t => {
   const f = await setup(t);
   assert.equal((await f.host.dispatch({ operation: 'save', expectedRevision: 0, settings: f.settings, token: syntheticToken })).ok, true);
