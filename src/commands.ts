@@ -3,14 +3,35 @@ import { SlashCommandBuilder } from 'discord.js';
 /**
  * Registered command surface is deliberately limited to operations backed by
  * Engine/AgentAdapter contracts. Every nested option list stays below Discord's
- * 25-option limit; unsupported settings/model/DM/C operations are help-only.
+ * 25-option limit; compact is an explicit, confirmation-gated Native command.
  */
 export const command = new SlashCommandBuilder().setName('agent').setDescription('許可済みDSH Sessionを安全に確認・操作')
   .setDMPermission(false)
-  .addSubcommand(c => c.setName('help').setDescription('使用可能な操作と未対応機能の理由').addStringOption(o => o.setName('topic').setDescription('説明する機能（model/reasoning/settings/context/dm/stop等）').setMaxLength(32)))
+  .addSubcommand(c => c.setName('help').setDescription('使用可能な操作と未対応機能の理由').addStringOption(o => o.setName('topic').setDescription('説明する機能（models/model/reasoning/settings/context等）').setMaxLength(32)))
   .addSubcommand(c => c.setName('current').setDescription('現在のSessionと確認可能な設定を表示'))
+  .addSubcommand(c => c.setName('models').setDescription('Nativeが広告する利用可能model catalogを検索')
+    .addStringOption(o => o.setName('provider').setDescription('provider IDまたは表示名').setMaxLength(100))
+    .addStringOption(o => o.setName('query').setDescription('model ID/nameまたはreasoning effortを検索').setMaxLength(100))
+    .addIntegerOption(o => o.setName('page').setDescription('ページ番号（1から）').setMinValue(1).setMaxValue(10000)))
+  .addSubcommand(c => c.setName('compact').setDescription('Native contextを圧縮（履歴を変更する場合があります）')
+    .addBooleanOption(o => o.setName('confirm').setDescription('実行と不明結果を再送しないことを確認').setRequired(true)))
+  .addSubcommandGroup(g => g.setName('context').setDescription('Native contextの確認・操作')
+    .addSubcommand(c => c.setName('show').setDescription('選択Sessionの限定Native projectionを表示'))
+    .addSubcommand(c => c.setName('compact').setDescription('現在のSession contextをNativeで圧縮')
+      .addBooleanOption(o => o.setName('confirm').setDescription('実行と不明結果を再送しないことを確認').setRequired(true))))
+  .addSubcommand(c => c.setName('rename').setDescription('選択Sessionのtitleを変更（Native CASなし・実行中不可）')
+    .addStringOption(o => o.setName('title').setDescription('新しいSession title（最大100文字）').setRequired(true).setMaxLength(100))
+    .addBooleanOption(o => o.setName('confirm-no-cas').setDescription('Native CASがなくDesktop同時変更を保護できないことを確認').setRequired(true)))
+  .addSubcommandGroup(g => g.setName('settings').setDescription('Nativeが対応するSession設定')
+    .addSubcommand(c => c.setName('title').setDescription('Session titleを変更（Native CASなし）')
+      .addStringOption(o => o.setName('value').setDescription('新しいSession title（最大100文字）').setRequired(true).setMaxLength(100))
+      .addBooleanOption(o => o.setName('confirm-no-cas').setDescription('Native CASがなくDesktop同時変更を保護できないことを確認').setRequired(true))))
   .addSubcommand(c => c.setName('workspaces').setDescription('許可済みWorkspace aliasをページ表示')
     .addIntegerOption(o => o.setName('page').setDescription('ページ番号（1から）').setMinValue(1).setMaxValue(100)))
+  .addSubcommand(c => c.setName('workspace-add').setDescription('接続後に既存フォルダーを許可（アクセス追加の明示確認が必要）')
+    .addStringOption(o => o.setName('alias').setDescription('新しい作業フォルダーの別名').setRequired(true).setMaxLength(40))
+    .addStringOption(o => o.setName('path').setDescription('このPCの既存フォルダーの絶対パス（OS sandboxではありません）').setRequired(true).setMaxLength(1024))
+    .addBooleanOption(o => o.setName('confirm-access').setDescription('許可ユーザーによるこのフォルダーへの作業アクセス追加を確認').setRequired(true)))
   .addSubcommand(c => c.setName('sessions').setDescription('許可Sessionを検索・ページ表示')
     .addStringOption(o => o.setName('query').setDescription('Session IDまたはタイトルで検索').setMaxLength(100))
     .addIntegerOption(o => o.setName('page').setDescription('ページ番号（1から）').setMinValue(1).setMaxValue(10000)))
@@ -46,10 +67,13 @@ export const command = new SlashCommandBuilder().setName('agent').setDescription
       .addBooleanOption(o => o.setName('confirm-duplicate-risk').setDescription('unknown配送の重複リスクを確認'))));
 
 export const HELP = `**DSH遠隔操作 — server-only**
-使用可能: /agent current, /agent workspaces [page], /agent sessions, /agent new, /agent bind, /agent unbind, /agent prompt, /agent status, /agent tasks, /agent result, /agent diagnose, /agent notifications show|set|retry, /agent notify（旧互換）。すべての操作は許可ユーザー・Guild・Channelを毎回検査します。
-/agent currentは確認可能なSession・Workspace alias・busy・Binding version・通知方針を表示します。model/reasoningはNative契約で取得できないため「不明」と表示します。
-/models・/model・/reasoning・/context・/settingsは未対応: 現行Native Session契約にmodel catalog/settings read-write/reasoning/context usage APIがありません。/agent newはworkspace aliasのみで、title/model/effort指定は行いません。
-/agent historyは未登録です。現行Native page契約にevent type/fieldを絞る正式filterがないため、reasoning/secretsを取得しない保証ができません。履歴を他APIや既存Run照合で推測しません。結果全文は/agent resultから確認してください。
-通知先変更は今後のRunだけに適用されます。originは許可サーバーチャンネルへの表示で、本人/Guild/Channel/選択Binding scopeを示したうえで明示確認が必要です。notifications showはpending/unknown/sending/blocked/incomplete/未送信part数を表示します。unknown配信は重複リスクを明示確認しない限り再試行できません。/agent notifyは通知の再試行だけで、指示を再送しません。
-C機能（stop、approval、queue、files、chat enable）は未登録・無効です。DSH GUIで承認待ちを確認してください。DM-only操作は設計・実証待ちで、DMからのコマンドは無効です。通常DM本文を実行しません。
+作業フォルダー未指定でも接続できます。接続後、/agent workspace-add alias:<別名> path:<PC上の絶対パス> confirm-access:true で既存フォルダーを許可し、/agent new workspace:<別名> または /agent sessions → /agent bind で作業先を選びます。登録は許可ユーザー・Guild・Channel限定で、既存別名は上書きしません。パスをコマンド引数としてDiscordに渡すため、秘密の文字列を含めないでください。
+使用可能: /agent current, /agent models, /agent context show, /agent compact confirm:true（/agent context compact confirm:trueも同じNative command）, /agent settings title value:<title>（/agent renameは互換alias）, /agent workspaces [page], /agent workspace-add, /agent sessions, /agent new, /agent bind, /agent unbind, /agent prompt, /agent status, /agent tasks, /agent result, /agent diagnose, /agent notifications show|set|retry, /agent notify（旧互換）。すべて許可ユーザー・Guild・Channelを毎回検査します。
+/agent currentは直近利用modelと次回設定modelを区別。実行中modelは断定しません。context showは限定projectionのみで、current usage/occupancy/costは不明です。
+/agent modelsはNative model/reasoning候補をread-only検索。provider失敗は非表示。model/reasoning変更、/agent newのtitle/model/effort、settings resetは未対応。selectModelはHost既定も変えるため無効です。
+/agent renameは選択中・待機中SessionのtitleをNativeで変更しreadbackを確認します。Native title CASはありません。結果不明時は自動再送しないでDSH GUIで確認してください。
+/agent historyは未登録。raw pageを後からfilterせず、最終回答は/agent resultで確認してください。
+/agent context showはNative projectionの限定値のみ。aggregatesは非atomic、asOfSeqはfold cursor。sample鮮度やcurrent usage・occupancy・percent・costは不明。0も新鮮さを示しません。windowはlast-request、breakdownはheuristicです。
+/agent context compactはNative commandを確認実行します。unknownは再送せず、該当Sessionだけprompt/bind/titleを停止。解除はDSH GUIで確認してください。通知先変更は今後のRunだけに適用され、origin公開は明示確認が必要です。unknown通知は重複リスクを確認しない限り再試行できません。進捗通知は未対応で最終回答のみです。
+C機能（targeted stop、approval、bridge FIFO queue、attachments/artifacts、chat enable）は未登録・無効です。DM-only操作は設計・実証待ちで、DMからのコマンドは無効です。通常DM本文を実行しません。DSH GUIで停止・承認を確認してください。
 通知は実行状態と別管理です。結果は/agent resultでページごとに確認できます。DSHのOS権限が適用されます。`;

@@ -90,18 +90,45 @@ async function setup(t: { after: (fn: () => unknown) => void }) {
   return { dir, config, store, adapter, engine };
 }
 
-test('command schema stays within Discord option limits and excludes unverified writes/history', () => {
-  const schema = command.toJSON() as unknown as { options: Array<{ name: string; type: number; options?: Array<{ name: string; type: number; options?: unknown[] }> }> };
-  assert.equal(schema.options.length, 14);
+test('command schema stays within Discord option limits and registers only verified operations', () => {
+  type CommandOption = { name: string; type: number; required?: boolean; options?: CommandOption[] };
+  const schema = command.toJSON() as unknown as { options: CommandOption[] };
+  assert.equal(schema.options.length, 20);
   assert.ok(schema.options.length <= 25);
   const names = new Set(schema.options.map(option => option.name));
-  for (const forbidden of ['history', 'models', 'model', 'reasoning', 'context', 'settings', 'stop', 'approval', 'queue', 'files']) assert.equal(names.has(forbidden), false);
+  assert.equal(names.has('models'), true);
+  assert.equal(names.has('settings'), true);
+  assert.equal(names.has('compact'), true);
+  const compact = schema.options.find(option => option.name === 'compact');
+  assert.equal(compact?.type, 1);
+  assert.equal(compact?.options?.find(option => option.name === 'confirm')?.required, true);
+  const context = schema.options.find(option => option.name === 'context');
+  assert.equal(context?.type, 2);
+  assert.equal(context?.options?.find(option => option.name === 'show')?.type, 1);
+  const contextCompact = context?.options?.find(option => option.name === 'compact');
+  assert.equal(contextCompact?.type, 1);
+  assert.equal(contextCompact?.options?.find(option => option.name === 'confirm')?.required, true);
+  for (const forbidden of ['history', 'model', 'reasoning', 'stop', 'approval', 'queue', 'files']) assert.equal(names.has(forbidden), false);
   for (const root of schema.options) {
     assert.ok((root.options?.length ?? 0) <= 25, `${root.name} options exceed limit`);
     for (const child of root.options ?? []) assert.ok((child.options?.length ?? 0) <= 25, `${root.name}.${child.name} options exceed limit`);
   }
   const allNames = schema.options.flatMap(root => [root, ...(root.options ?? [])]).map(option => option.name);
   assert.equal(allNames.includes('progress'), false);
+});
+
+test('workspace registration requires authorization, confirmation and a supported Host callback', async t => {
+  const { engine, config } = await setup(t);
+  const inputs = { alias: 'project', path: '/synthetic/project', 'confirm-access': true };
+  await assert.rejects(handleAgentCommand(interaction('workspace-add', inputs), engine, config, true), { code: 'WORKSPACE_SETUP_UNAVAILABLE' });
+  const calls: unknown[] = [];
+  engine.registerWorkspace = async (...args) => { calls.push(args); };
+  await assert.rejects(handleAgentCommand(interaction('workspace-add', { ...inputs, 'confirm-access': false }), engine, config, true), { code: 'CONFIRMATION_REQUIRED' });
+  await assert.rejects(handleAgentCommand(interaction('workspace-add', inputs, { userId: '999999999999999999' }), engine, config, true), { code: 'NOT_AUTHORIZED' });
+  assert.equal(calls.length, 0);
+  const reply = await handleAgentCommand(interaction('workspace-add', inputs), engine, config, true);
+  assert.equal(calls.length, 1); assert.ok(!reply.content.includes(inputs.path));
+  assert.ok(reply.content.includes('/agent new'));
 });
 
 test('cross-user and DM rejection happen before adapter operations', async t => {
@@ -131,7 +158,7 @@ test('current, workspace alias, and task views show only authorized summary fiel
   const current = await handleAgentCommand(interaction('current'), engine, config, true);
   assert.match(current.content, /Session ID: old-session-id/u);
   assert.match(current.content, /Workspace: test/u);
-  assert.match(current.content, /Busy: 実行中／処理待ちあり/u);
+  assert.match(current.content, /Busy: 実行中/u);
   assert.match(current.content, /Binding version: 1/u);
   assert.doesNotMatch(current.content, new RegExp(config.workspaces.test!.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   adapter.rows[0]!.running = false;
@@ -167,7 +194,7 @@ test('notification scope confirmation and status counters are explicit', async t
   assert.match(set.content, /今後のRun/u);
 });
 
-test('unregistered model/settings/stop operations fail with zero Native side effects', async t => {
+test('unsupported model writes/settings reset/stop operations fail with zero Native side effects', async t => {
   const { engine, config, adapter, store } = await setup(t);
   const beforeBinding = engine.binding(actor);
   const beforeCalls = { list: adapter.listCalls, prompt: adapter.promptCalls, create: adapter.createCalls, snapshot: adapter.snapshotCalls, events: adapter.eventCalls };
@@ -175,10 +202,14 @@ test('unregistered model/settings/stop operations fail with zero Native side eff
     await assert.rejects(handleAgentCommand(interaction(name), engine, config, true), { code: 'UNKNOWN_COMMAND' });
   }
   const help = await handleAgentCommand(interaction('help', { topic: 'model' }), engine, config, true);
-  assert.match(help.content, /model catalog/u);
+  assert.match(help.content, /read-only catalog/u);
   adapter.history = async () => { adapter.historyCalls++; return []; };
   const diagnose = await handleAgentCommand(interaction('diagnose'), engine, config, true);
-  assert.match(diagnose.content, /History: unavailable（official field-filtered Native contract unverified）/u);
+  assert.match(diagnose.content, /History: unavailable（Native sessionQuery\.filterEvents is available, but role\/output and bounded materialization are not safely implemented）/u);
+  assert.match(diagnose.content, /Native Compact command: unavailable/u);
+  assert.match(diagnose.content, /model catalog: unavailable/u);
+  assert.match(diagnose.content, /Session title rename: unavailable/u);
+  assert.match(diagnose.content, /model\/reasoning選択はHost既定も変える可能性があり未対応/u);
   assert.equal(adapter.historyCalls, 0);
   assert.deepEqual({ list: adapter.listCalls, prompt: adapter.promptCalls, create: adapter.createCalls, snapshot: adapter.snapshotCalls, events: adapter.eventCalls }, { ...beforeCalls, list: beforeCalls.list + 1 });
   assert.equal(engine.binding(actor), beforeBinding);

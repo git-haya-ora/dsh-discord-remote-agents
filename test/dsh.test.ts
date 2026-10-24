@@ -35,6 +35,15 @@ test('real HTTP cookie bootstrap, named args envelope, list/projections/create/p
   assert.match(await adapter.create('C:\\project'), /^discord-/); await adapter.prompt('existing', 'discord:123', 'hello');
   assert.equal(logins(), 1); assert.deepEqual(calls.map(c => c.method), ['list', 'projections', 'create', 'prompt']);
 });
+test('modelSelection projection distinguishes last-used from next and copies only bounded official fields', async t => {
+  const { adapter } = await serve(t, ({ method }) => method === 'list' ? { items: [{ sessionId: 'existing', cwd: 'C:\\\\project', running: false, updatedAt: 1,
+    projections: { values: { title: 'synthetic', modelSelection: { lastUsed: { provider: 'provider-a', model: 'model-used', reasoningEffort: 'high', secret: 'DROP' },
+      next: { provider: 'provider-b', model: 'model-next', reasoningEffort: 'low' } } } } }] } : { items: [] });
+  const session = (await adapter.list())[0]!;
+  assert.deepEqual(session.lastUsedModel, { provider: 'provider-a', model: 'model-used', reasoningEffort: 'high' });
+  assert.deepEqual(session.nextModel, { provider: 'provider-b', model: 'model-next', reasoningEffort: 'low' });
+});
+
 test('page walks backward with stable throughSeq, verifies contiguous stream then returns chronological suffix', async t => {
   const events = Array.from({ length: 6 }, (_, seq) => ({ type: 'example', seq, time: seq, data: {} }));
   const { adapter, calls } = await serve(t, ({ request }) => {

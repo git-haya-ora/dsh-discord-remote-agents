@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ChatInputCommandInteraction } from 'discord.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { handleAgentCommand } from '../src/command-handler.js';
 import { Engine, type Actor } from '../src/engine.js';
-import { Store } from '../src/store.js';
+import { bindingKey, Store } from '../src/store.js';
 import { Policy } from '../src/policy.js';
 import { AppError } from '../src/errors.js';
 import type { Config } from '../src/config.js';
-import type { AgentAdapter, SessionInfo, Snapshot, WireEvent } from '../src/types.js';
+import type { AgentAdapter, ContextMetrics, ModelCatalog, SessionInfo, SessionRenameValue, Snapshot, WireEvent } from '../src/types.js';
 const actor: Actor = { userId: '111111111111111111', guildId: '222222222222222222', channelId: '333333333333333333' };
 function interaction(sub: string, values: Record<string, string | number | boolean> = {}, group: string | null = null, changes: Partial<Actor> = {}): ChatInputCommandInteraction {
   return { commandName: 'agent', id: 'extended-run', user: { id: changes.userId ?? actor.userId, bot: false }, guildId: changes.guildId ?? actor.guildId, channelId: changes.channelId ?? actor.channelId,
@@ -17,20 +20,38 @@ function interaction(sub: string, values: Record<string, string | number | boole
 }
 class Adapter implements AgentAdapter {
   rows: SessionInfo[] = [{ sessionId: 'native-session', title: '日本語😀', cwd: process.cwd(), running: false, subagent: false, updatedAt: 1 }];
-  listCalls = 0; creates = 0; prompts = 0; log: WireEvent[] = []; revoke: (() => void) | undefined;
+  listCalls = 0; creates = 0; prompts = 0; catalogCalls = 0; snapshotCalls = 0; renameCalls: Array<{ sessionId: string; title: string }> = []; log: WireEvent[] = []; revoke: (() => void) | undefined;
+  contextMetricsValue: ContextMetrics | undefined;
+  contextMetricsCalls: Array<{ sessionId: string; cwd: string }> = [];
+  verifySession?: (sessionId: string) => Promise<void>;
+  onContextMetrics: (() => void) | undefined;
+  inbox: Record<string, unknown> = { 'next-turn': [], 'next-step': [] };
+  catalog: ModelCatalog = { default: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'medium' }, routableProviders: ['provider-a'],
+    groups: [{ id: 'provider-a', name: 'Provider A', models: [{ id: 'model-a', name: 'Model A', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }], defaultEffort: 'medium' } }] }], failedProviders: 1 };
   async list(): Promise<SessionInfo[]> { this.listCalls++; this.revoke?.(); return this.rows; }
   async create(): Promise<string> { this.creates++; return 'new'; }
   async prompt(): Promise<void> { this.prompts++; }
-  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? -1, values: {} }; }
+  async modelCatalog(): Promise<ModelCatalog> { this.catalogCalls++; return this.catalog; }
+  contextMetrics(sessionId: string, cwd: string): ContextMetrics | undefined {
+    this.contextMetricsCalls.push({ sessionId, cwd }); this.onContextMetrics?.(); return this.contextMetricsValue;
+  }
+  async rename(request: { sessionId: string; title: string }): Promise<SessionRenameValue> {
+    this.renameCalls.push(request); const row = this.rows.find(value => value.sessionId === request.sessionId);
+    if (!row) throw new AppError('SESSION_NOT_FOUND', 'not found'); row.title = request.title;
+    const seq = (this.log.at(-1)?.seq ?? -1) + 1; this.log.push({ seq, time: 1, type: 'session/title', data: { title: request.title } });
+    return { title: request.title, seq };
+  }
+  async snapshot(): Promise<Snapshot> { this.snapshotCalls++; return { cursor: this.log.at(-1)?.seq ?? 0, values: { inbox: this.inbox, title: this.rows[0]?.title } }; }
   async events(_id: string, through: number, after: number): Promise<WireEvent[]> { return this.log.filter(event => event.seq > after && event.seq <= through); }
   async history(): Promise<Array<{ seq: number; role: 'assistant'; text: string; reasoning?: string; tool?: string }>> { return [{ seq: 0, role: 'assistant', text: '安全😀'.repeat(300), reasoning: 'PRIVATE_REASONING', tool: 'PRIVATE_TOOL' }]; }
 }
-async function setup(t: { after(fn: () => unknown): void }) {
+async function setup(t: { after(fn: () => unknown): void }, databasePath = ':memory:') {
   const config: Config = { token: 'placeholder', applicationId: '444444444444444444', guildId: actor.guildId, allowedUserIds: new Set([actor.userId]), allowedChannelIds: new Set([actor.channelId]),
     workspaces: { test: process.cwd() }, dshUrl: 'http://127.0.0.1:19387', dshToken: 'placeholder', pollIntervalMs: 5000, databasePath: ':memory:' };
-  const store = new Store(':memory:', true); store.setSetting('restricted-storage-profile', 'single-operator-text-v1');
+  const store = new Store(databasePath, true); store.setSetting('restricted-storage-profile', 'single-operator-text-v1');
+  let closed = false; const close = () => { if (!closed) { store.close(); closed = true; } };
   const adapter = new Adapter(); const engine = new Engine(adapter, store, await Policy.create(config), ['PRIVATE_SECRET'], true); await engine.bind(actor, 'native-session');
-  t.after(() => store.close()); return { engine, store, adapter, config };
+  t.after(close); return { engine, store, adapter, config, close };
 }
 for (const setting of ['model', 'effort', 'title']) test(`unsupported new ${setting} refuses BEFORE Native create or prompt`, async t => {
   const { engine, adapter, config } = await setup(t);
@@ -48,6 +69,88 @@ test('wrong channel/user/guild and unsupported context produce no Native effects
   await assert.rejects(handleAgentCommand(interaction('context'), engine, config, true), { code: 'UNKNOWN_COMMAND' });
   assert.equal(adapter.listCalls, before); assert.equal(adapter.creates, 0); assert.equal(adapter.prompts, 0);
 });
+test('/agent context show labels zero projections without claiming a fresh sample', async t => {
+  const { engine, adapter, config } = await setup(t);
+  adapter.contextMetricsValue = { pressureTokens: 0, projectedTokens: 0, contextWindow: 4096, systemTokens: 0, toolsTokens: 0, messageTokens: 0, asOfSeq: 0 };
+  const response = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(response.content, /Prompt-side pressure.*0 tokens/u);
+  assert.match(response.content, /Next-request forecast.*0 tokens/u);
+  assert.match(response.content, /0もsampleの存在や鮮度を証明しません/u);
+  assert.match(response.content, /実際のoccupancy\/使用率・currentness・費用は推測しません/u);
+  assert.doesNotMatch(response.content, /100%|fresh sample confirmed/iu);
+  assert.deepEqual(adapter.contextMetricsCalls, [{ sessionId: 'native-session', cwd: process.cwd() }]);
+  assert.equal(response.content.includes(process.cwd()), false);
+});
+
+test('/agent context show avoids the broader Session verifier and makes one authorized list observation', async t => {
+  const { engine, adapter, config } = await setup(t);
+  let verifierCalls = 0;
+  adapter.verifySession = async () => { verifierCalls++; };
+  adapter.contextMetricsValue = { pressureTokens: 4 };
+  const beforeLists = adapter.listCalls;
+  const response = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(response.content, /Prompt-side pressure.*4 tokens/u);
+  assert.equal(adapter.listCalls - beforeLists, 1);
+  assert.equal(verifierCalls, 0);
+  assert.deepEqual(adapter.contextMetricsCalls, [{ sessionId: 'native-session', cwd: process.cwd() }]);
+});
+
+test('/agent context show keeps forecast, last-request window, heuristic breakdown and fold cursor distinct', async t => {
+  const { engine, adapter, config } = await setup(t);
+  adapter.contextMetricsValue = { pressureTokens: 1024, projectedTokens: 8192, contextWindow: 4096, systemTokens: 100, toolsTokens: 200, messageTokens: 724, asOfSeq: 4 };
+  const first = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(first.content, /Prompt-side pressure.*1,024 tokens/u);
+  assert.match(first.content, /Next-request forecast.*8,192 tokens/u);
+  assert.match(first.content, /Last-request context window.*4,096 tokens/u);
+  assert.match(first.content, /Heuristic system tokens.*100 tokens/u);
+  assert.match(first.content, /Fold cursor \(asOfSeq\): 4.*測定時刻/u);
+  assert.match(first.content, /同一requestのatomicな観測ではありません/u);
+  assert.doesNotMatch(first.content, /\d+%/u);
+
+  adapter.contextMetricsValue = { pressureTokens: 1024, projectedTokens: 512, contextWindow: 4096, systemTokens: 100, toolsTokens: 200, messageTokens: 724, asOfSeq: 99 };
+  const afterCompaction = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(afterCompaction.content, /Prompt-side pressure.*1,024 tokens/u);
+  assert.match(afterCompaction.content, /Next-request forecast.*512 tokens/u);
+  assert.match(afterCompaction.content, /Fold cursor \(asOfSeq\): 99.*測定時刻/u);
+  assert.equal(adapter.contextMetricsCalls.length, 2);
+  assert.equal(adapter.contextMetricsCalls.every(call => call.sessionId === 'native-session' && call.cwd === process.cwd()), true);
+  assert.equal(first.content.includes(process.cwd()), false);
+  assert.equal(afterCompaction.content.includes(process.cwd()), false);
+});
+
+test('/agent context show does not treat an unrelated fold cursor advance as a fresh sample', async t => {
+  const { engine, adapter, config } = await setup(t);
+  adapter.contextMetricsValue = { pressureTokens: 512, projectedTokens: 700, contextWindow: 4096, systemTokens: 50, toolsTokens: 75, messageTokens: 387, asOfSeq: 11 };
+  const before = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  adapter.contextMetricsValue = { pressureTokens: 512, projectedTokens: 700, contextWindow: 4096, systemTokens: 50, toolsTokens: 75, messageTokens: 387, asOfSeq: 12 };
+  const afterUnrelatedEvent = await handleAgentCommand(interaction('show', {}, 'context'), engine, config, true);
+  assert.match(before.content, /Fold cursor \(asOfSeq\): 11.*測定時刻/u);
+  assert.match(afterUnrelatedEvent.content, /Fold cursor \(asOfSeq\): 12.*測定時刻/u);
+  assert.match(afterUnrelatedEvent.content, /同一requestのatomicな観測ではありません/u);
+  assert.match(afterUnrelatedEvent.content, /0もsampleの存在や鮮度を証明しません/u);
+  assert.equal(adapter.contextMetricsCalls.length, 2);
+  assert.equal(afterUnrelatedEvent.content.includes(process.cwd()), false);
+});
+
+test('/agent context show authorizes first and fails closed if authorization or Binding changes', async t => {
+  const unauthorized = await setup(t);
+  const beforeUnauthorized = unauthorized.adapter.listCalls;
+  await assert.rejects(handleAgentCommand(interaction('show', {}, 'context', { userId: '999999999999999999' }), unauthorized.engine, unauthorized.config, true), { code: 'NOT_AUTHORIZED' });
+  assert.equal(unauthorized.adapter.listCalls, beforeUnauthorized);
+  assert.equal(unauthorized.adapter.contextMetricsCalls.length, 0);
+
+  const revoked = await setup(t);
+  revoked.adapter.revoke = () => revoked.config.allowedUserIds.delete(actor.userId);
+  await assert.rejects(handleAgentCommand(interaction('show', {}, 'context'), revoked.engine, revoked.config, true), { code: 'NOT_AUTHORIZED' });
+  assert.equal(revoked.adapter.contextMetricsCalls.length, 0);
+
+  const changed = await setup(t);
+  changed.adapter.contextMetricsValue = { pressureTokens: 5 };
+  changed.adapter.onContextMetrics = () => changed.store.bind(bindingKey(actor.guildId, actor.channelId, 'shared'), 'other-native-session', changed.engine.bindingVersion(actor), true);
+  await assert.rejects(handleAgentCommand(interaction('show', {}, 'context'), changed.engine, changed.config, true), { code: 'BINDING_CONFLICT' });
+  assert.deepEqual(changed.adapter.contextMetricsCalls, [{ sessionId: 'native-session', cwd: process.cwd() }]);
+});
+
 test('command origin preferences require scoped consent and affect only future Run', async t => {
   const { engine, adapter, store, config } = await setup(t); await engine.submit(actor, 'earlier', 'earlier prompt');
   await assert.rejects(handleAgentCommand(interaction('set', { destination: 'origin' }, 'notifications'), engine, config, true), { code: 'CONFIRMATION_REQUIRED' });
@@ -62,6 +165,56 @@ test('session emoji titles and workspace aliases remain within response UTF16 bu
   config.workspaces = Object.fromEntries(Array.from({ length: 40 }, (_, n) => [`${n}😀${'*'.repeat(80)}`, process.cwd()]));
   for (const page of [1, 2]) { const response = await handleAgentCommand(interaction('workspaces', { page }), engine, config, true); assert.ok(response.content.length <= 2000); assert.ok(!response.content.includes(process.cwd())); }
 });
+test('/agent models displays filtered per-model Native reasoning metadata without provider failure details', async t => {
+  const { engine, adapter, config } = await setup(t);
+  const response = await handleAgentCommand(interaction('models', { query: 'low', page: 1 }), engine, config, true);
+  assert.match(response.content, /Native model catalog（read-only/u);
+  assert.match(response.content, /Model A/u); assert.match(response.content, /Low \(low\)/u);
+  assert.match(response.content, /Host既定（Session設定とは別）/u);
+  assert.match(response.content, /取得できないprovider: 1（詳細は非表示）/u);
+  assert.ok(response.content.length <= 2000); assert.equal(adapter.catalogCalls, 1);
+});
+
+test('/agent settings title requires no-CAS confirmation, serializes and readbacks the exact bound Session', async t => {
+  const { engine, adapter, config } = await setup(t); const beforeLists = adapter.listCalls;
+  await assert.rejects(handleAgentCommand(interaction('title', { value: 'renamed' }, 'settings'), engine, config, true), { code: 'CONFIRMATION_REQUIRED' });
+  assert.equal(adapter.listCalls, beforeLists); assert.equal(adapter.renameCalls.length, 0);
+  const response = await handleAgentCommand(interaction('title', { value: 'renamed', 'confirm-no-cas': true }, 'settings'), engine, config, true);
+  assert.deepEqual(adapter.renameCalls, [{ sessionId: 'native-session', title: 'renamed' }]);
+  assert.equal(adapter.rows[0]!.title, 'renamed'); assert.match(response.content, /readback確認/u); assert.match(response.content, /Native title CASはありません/u);
+});
+
+test('title mutation after restart is fenced by the durable unknown Compact for that exact Session', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'compact-rename-fence-synthetic-'));
+  const databasePath = join(root, 'journal.sqlite');
+  const fixture = await setup(t, databasePath);
+  fixture.store.reserveCompactIntent({
+    schemaVersion: 1, intentId: 'c'.repeat(64), sessionId: 'native-session', agentId: 'native-session',
+    applicationId: fixture.config.applicationId, botId: fixture.config.applicationId, ownerId: actor.userId,
+    guildId: actor.guildId, channelId: actor.channelId, bindingMode: 'shared',
+    bindingId: bindingKey(actor.guildId, actor.channelId, 'shared'), bindingVersion: fixture.engine.bindingVersion(actor),
+    workspaceDigest: 'd'.repeat(64), definitionId: '@deepseek-ai/dsh-command-compact', state: 'unknown', dispatchedAt: Date.now()
+  });
+  fixture.close();
+  const reopenedStore = new Store(databasePath, true);
+  t.after(() => reopenedStore.close());
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const reopenedEngine = new Engine(fixture.adapter, reopenedStore, await Policy.create(fixture.config), ['PRIVATE_SECRET'], true);
+  await assert.rejects(handleAgentCommand(interaction('title', { value: 'must-not-rename', 'confirm-no-cas': true }, 'settings'), reopenedEngine, fixture.config, true), { code: 'COMPACT_UNKNOWN' });
+  assert.equal(fixture.adapter.snapshotCalls, 0);
+  assert.equal(fixture.adapter.renameCalls.length, 0);
+  assert.equal(fixture.adapter.rows[0]!.title, '日本語😀');
+});
+
+test('title mutation fails closed on unknown queue or tracked busy Run', async t => {
+  const { engine, adapter, config, store } = await setup(t); adapter.inbox = {};
+  await assert.rejects(handleAgentCommand(interaction('title', { value: 'must-not-change', 'confirm-no-cas': true }, 'settings'), engine, config, true), { code: 'SESSION_STATE_UNKNOWN' });
+  assert.equal(adapter.renameCalls.length, 0); adapter.inbox = { 'next-turn': [], 'next-step': [] };
+  await engine.submit(actor, 'active-title-run', 'prompt');
+  await assert.rejects(handleAgentCommand(interaction('title', { value: 'must-not-change', 'confirm-no-cas': true }, 'settings'), engine, config, true), { code: 'SESSION_BUSY' });
+  assert.equal(adapter.renameCalls.length, 0); assert.equal(store.get('active-title-run')!.state, 'accepted');
+});
+
 test('unsupported stale history command fetches no Native private events or projected text', async t => {
   const { engine, adapter, config } = await setup(t); const before = adapter.listCalls;
   adapter.history = async () => assert.fail('unsupported history must not fetch');
@@ -76,10 +229,10 @@ test('sessions authorization is rechecked after awaited Native list', async t =>
 test('metadata status remains succeeded with body unavailable; blocked backlog visible without disclosure', async t => {
   const { engine, adapter, config, store } = await setup(t); await engine.submit(actor, 'extended-run', 'prompt');
   adapter.log = [
-    { seq: 0, time: 0, type: 'turn/start', data: { turn: 1 } },
-    { seq: 1, time: 0, type: 'user/message', surfaceOp: 'append', data: { source: { kind: 'user', rpcId: 'discord:extended-run' } } },
-    { seq: 2, time: 0, type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'PRIVATE_FINAL' }] } } },
-    { seq: 3, time: 0, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }
+    { seq: 1, time: 0, type: 'turn/start', data: { turn: 1 } },
+    { seq: 2, time: 0, type: 'user/message', surfaceOp: 'append', data: { source: { kind: 'user', rpcId: 'discord:extended-run' } } },
+    { seq: 3, time: 0, type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'PRIVATE_FINAL' }] } } },
+    { seq: 4, time: 0, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }
   ];
   await engine.tick(async () => { throw new AppError('DELIVERY_BLOCKED', 'private raw failure'); });
   const run = store.get('extended-run')!; run.result = ''; run.output = ''; run.bodyMissing = true; store.save(run); adapter.log = [];

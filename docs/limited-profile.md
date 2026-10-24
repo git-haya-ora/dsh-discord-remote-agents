@@ -26,7 +26,7 @@
 - 設定変更・停止・disposeはこのpluginのreceiver資源だけを解放する。開始済みのDSH処理を停止したり、未確定記録を消したりしない。
 - 通知はモデル指示と区別する。第23章の追加ブランチでは各partの送信前fence・message IDを記録し、送信不明は後続を保留して自動再送しない。判定不能な配送の明示再試行には重複リスクの確認が必要で、モデル指示を再送しない。既存unknownを消したり、再送可能へ自動移行したりしない。Discord側との分散exactly-onceは保証しない。
 
-第23章の開発版 `0.2.0-restricted.4` は各partの状態・receipt・digest、Binding／Run revision CAS、将来Runだけの通知設定を追加する。[全文配送](<full-output.md>)の自動capは100,000 code points／128 parts、手動resultは独立page参照でありtext添付を送らない。SQLiteに本文を置かず再起動後は検証済みNative履歴に依存する。保護payloadへの全文保存・清掃（OUT-08全体）は未統合。historyも不要なprivate fieldを取得しない正式filter契約がないため未登録。正式モデル／設定契約、DM操作、C機能は未対応のままで、この公開repoで開発を継続するが、full-spec完成やnpm registry公開とは扱わない。
+第23章の開発版 `0.2.0-restricted.8` は各partの状態・receipt・digest、Binding／Run revision CAS、将来Runだけの通知設定を含む。[全文配送](<full-output.md>)の自動capは100,000 code points／128 parts、手動resultは独立page参照でありtext添付を送らない。OUT-08はBridge専用DPAPI profileで終端本文／partをdurable保護し、readback後のatomic terminal publish、確定receipt後7日のexact-ref cleanupまで部分実装した。unknown・未送信・orphanは保持し、90日metadata pruning、全process-kill／複数Store quota検証、official Native receipt/provenance、live acceptanceは未達。historyも不要なprivate fieldを取得しない正式filter契約がないため未登録。正式model/settings、DM、C機能も未対応で、この公開repoで開発を継続するがfull-spec完成やnpm registry公開とは扱わない。
 
 ## 検証と完成の区別
 

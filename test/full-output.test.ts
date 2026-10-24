@@ -13,16 +13,16 @@ import type { AgentAdapter, SessionInfo, Snapshot, WireEvent } from '../src/type
 const actor: Actor = { userId: '111111111111111111', guildId: '222222222222222222', channelId: '333333333333333333' };
 const event = (seq: number, type: string, data: Record<string, unknown>, surfaceOp?: unknown): WireEvent => ({ seq, type, data, time: 1, surfaceOp });
 function completed(text: string): WireEvent[] {
-  return [event(0, 'turn/start', { turn: 1 }), event(1, 'user/message', { source: { kind: 'user', rpcId: 'discord:run' } }, 'append'),
-    event(2, 'assistant/message', { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'INTERMEDIATE' }, { type: 'tool_use' }] } }, 'append'),
-    event(3, 'assistant/message', { turn: 1, message: { role: 'assistant', content: [{ type: 'reasoning', text: 'PRIVATE' }, { type: 'text', text }] } }, 'append'),
-    event(4, 'turn/end', { turn: 1, reason: { kind: 'completed' } })];
+  return [event(1, 'turn/start', { turn: 1 }), event(2, 'user/message', { source: { kind: 'user', rpcId: 'discord:run' } }, 'append'),
+    event(3, 'assistant/message', { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'INTERMEDIATE' }, { type: 'tool_use' }] } }, 'append'),
+    event(4, 'assistant/message', { turn: 1, message: { role: 'assistant', content: [{ type: 'reasoning', text: 'PRIVATE' }, { type: 'text', text }] } }, 'append'),
+    event(5, 'turn/end', { turn: 1, reason: { kind: 'completed' } })];
 }
 class Adapter implements AgentAdapter {
   rows: SessionInfo[] = []; log: WireEvent[] = []; promptCalls = 0; reject = false;
   async list(): Promise<SessionInfo[]> { return this.rows; }
   async create(): Promise<string> { return 'session'; }
-  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? -1, values: {} }; }
+  async snapshot(): Promise<Snapshot> { return { cursor: this.log.at(-1)?.seq ?? 0, values: { inbox: { 'next-turn': [], 'next-step': [] } } }; }
   async events(_id: string, through: number, after: number): Promise<WireEvent[]> { return this.log.filter(e => e.seq > after && e.seq <= through); }
   async prompt(): Promise<void> { this.promptCalls++; if (this.reject) throw new DshRejected('DSH_REJECTED', 'test'); }
 }

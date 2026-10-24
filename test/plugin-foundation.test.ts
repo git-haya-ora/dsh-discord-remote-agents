@@ -9,6 +9,7 @@ import type { ManagementRequest, SecretUpdate } from '../packages/discord-plugin
 test('bundle uses documented patch and pinned self-contained Host dependencies', async () => {
   const root = new URL('../../packages/discord-plugin/', import.meta.url);
   const manifest = JSON.parse(await readFile(new URL('package.json', root), 'utf8'));
+  // Connection owns the authenticated /api carrier and the webServer dependency.
   assert.deepEqual(inject, ['connection', 'sessionController']);
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml');
   assert.equal(manifest.exports['.'].default, './index.js');
@@ -54,13 +55,13 @@ test('management operations reject without authority; no mock authority grants s
 test('Cordis effects own management RPC and idempotent disposal with blocked invalid config', async () => {
   const cleanups: (() => void | Promise<void>)[] = [];
   let calls = 0;
-  let handler: Parameters<Parameters<typeof apply>[0]['connection']['rpc']['handle']>[1] | undefined;
+  let handler: ((request: Request) => Promise<Response>) | undefined;
   const ctx = {
     effect(factory: () => (() => void) | (() => Promise<void>)) { cleanups.push(factory()); },
-    connection: { rpc: { handle(channel: string, callback: Parameters<Parameters<typeof apply>[0]['connection']['rpc']['handle']>[1]) {
-      assert.equal(arguments.length, 2);
-      assert.equal(channel, '/discord-remote-agents');
-      handler = callback;
+    connection: { rpc: { handle() { throw new Error('Broken SDK RPC prefix registration must not be used'); } }, fetch: { register(route: {path: string; methods: string[]; requestBody: string; fetch(request: Request): Promise<Response>}) {
+      assert.equal(route.path, '/api/discord-remote-agents.manage');
+      assert.deepEqual(route.methods, ['POST']); assert.equal(route.requestBody, 'buffered');
+      handler = route.fetch;
       calls++; return () => { calls--; };
     } } },
     sessionController: {
@@ -71,9 +72,17 @@ test('Cordis effects own management RPC and idempotent disposal with blocked inv
   apply(ctx, { dataRoot: 'relative-invalid' });
   assert.equal(calls, 1); assert.equal(cleanups.length, 2);
   assert.ok(handler);
-  assert.deepEqual(await handler('not-manage', { operation: 'status' }, new AbortController().signal, {}), { ok: false, code: 'INVALID_REQUEST' });
-  assert.equal((await handler('manage', { operation: 'status' }, new AbortController().signal, {})).ok, true);
-  assert.deepEqual(await handler('status', 'manage', new AbortController().signal, {}), { ok: false, code: 'INVALID_REQUEST' });
+  const envelope = { type: 'client-request', rpcId: 'synthetic-request', method: 'discord-remote-agents.manage', payload: { operation: 'status' } };
+  const request = (body: unknown, endpoint = 'discord-remote-agents.manage', type = 'application/json') => new Request(`http://localhost/api/${endpoint}`, { method: 'POST', headers: { 'content-type': type }, body: JSON.stringify(body) });
+  const reply = await handler(request(envelope));
+  assert.equal(reply.status, 200); assert.equal(reply.headers.get('cache-control'), 'no-store');
+  const wire = await reply.json(); assert.equal(wire.rpcId, envelope.rpcId); assert.equal(wire.result.ok, true); assert.equal(wire.result.value.ok, true);
+  assert.equal((await handler(request(envelope, 'other'))).status, 404);
+  assert.equal((await handler(request(envelope, undefined, 'text/plain'))).status, 415);
+  for (const body of [null, [], {}, { ...envelope, method: 'other' }, { ...envelope, rpcId: '' }, { ...envelope, extra: 'synthetic-private-input' }]) {
+    const denied = await handler(request(body)); assert.equal(denied.status, 400); assert.equal(await denied.text(), '');
+  }
+  assert.equal((await handler(request({ ...envelope, payload: 'x'.repeat(131073) }))).status, 413);
   for (const cleanup of cleanups) await cleanup();
   assert.equal(calls, 0); await cleanups[1]!();
   const host = new FoundationHost();

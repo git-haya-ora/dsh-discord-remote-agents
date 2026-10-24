@@ -1,6 +1,9 @@
 import { DiscordHost, RPC_CHANNEL, RPC_ENDPOINT } from './host-runtime.js';
 export { DiscordHost } from './host-runtime.js';
 // Cordis Host injection names services, not dependency package identifiers.
+// Exact Fetch contributions are mounted by Connection's authenticated /api carrier.
+// Do not register a separate RPC prefix: affected SDK builds resolve its webServer
+// dependency against the Connection provider rather than this consumer.
 export const inject = ['connection', 'sessionController'];
 const names = [
   'sessions.list', 'sessions.create', 'sessions.history', 'sessions.sharedWithDesktop',
@@ -36,9 +39,77 @@ export class FoundationHost {
 }
 export function apply(ctx, config = {}) {
   const host = new DiscordHost(ctx, config);
-  // Documented Host RPC is connection-authenticated local authority, not RFC-M
-  // owner/admin. No HTTP/Cookie bridge or claimed caller-bound grants are installed.
-  ctx.effect(() => ctx.connection.rpc.handle(RPC_CHANNEL, (endpoint, payload, signal) => endpoint === RPC_ENDPOINT
-    ? host.dispatch(payload, signal) : Promise.resolve({ ok: false, code: 'INVALID_REQUEST' })));
+  // The command service is an optional feature: profiles without it still get
+  // the ordinary restricted Host runtime. Never add it to required injection.
+  if (typeof ctx.inject === 'function') {
+    let compactServiceGeneration = 0;
+    try {
+      ctx.inject(['commands', 'agents'], services => {
+        const generation = ++compactServiceGeneration;
+        host.attachCompactServices(services.commands, services.agents);
+        services.effect(() => () => {
+          if (generation !== compactServiceGeneration) return;
+          compactServiceGeneration++;
+          host.attachCompactServices(undefined, undefined);
+        });
+      });
+    } catch { /* Compact remains unavailable; core Host startup is unaffected. */ }
+    // Context metrics are a separate optional, read-only feature. Keep them out of
+    // the required injection and compact-service lifecycle.
+    let contextMetricServiceGeneration = 0;
+    try {
+      ctx.inject(['sessions', 'sessionProjections'], services => {
+        const generation = ++contextMetricServiceGeneration;
+        host.attachContextMetricServices(services.sessions, services.sessionProjections);
+        services.effect(() => () => {
+          if (generation !== contextMetricServiceGeneration) return;
+          contextMetricServiceGeneration++;
+          host.attachContextMetricServices(undefined, undefined);
+        });
+      });
+    } catch {
+      contextMetricServiceGeneration++; host.attachContextMetricServices(undefined, undefined);
+    }
+  }
+  // This exact route is reachable only through the official /api carrier, which
+  // performs Host/Origin and browser-session admission BEFORE dispatching routes.
+  // The outer Connection reply carries our own narrow management DTO as its value.
+  if (typeof ctx.connection?.fetch?.register !== 'function') throw new Error('HOST_COMPATIBILITY_UNVERIFIED');
+  ctx.effect(() => ctx.connection.fetch.register({
+    path: `${RPC_CHANNEL}/${RPC_ENDPOINT}`, methods: ['POST'], requestBody: 'buffered',
+    async fetch(request) {
+      if (request.method !== 'POST' || new URL(request.url).pathname !== `${RPC_CHANNEL}/${RPC_ENDPOINT}`) return new Response(null, { status: 404 });
+      if (request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return new Response(null, { status: 415 });
+      let body;
+      try {
+        // Independently cap the management envelope; never echo input or errors.
+        const reader = request.body?.getReader();
+        if (!reader) return new Response(null, { status: 400 });
+        const chunks = []; let length = 0;
+        try {
+          while (true) {
+            const { done, value } = await reader.read(); if (done) break;
+            length += value.byteLength;
+            if (length > 131072) { await reader.cancel(); return new Response(null, { status: 413 }); }
+            chunks.push(value);
+          }
+        } finally { reader.releaseLock(); }
+        const bytes = new Uint8Array(length); let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+        body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      } catch { return new Response(null, { status: 400 }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+        || Object.keys(body).some(key => !['type', 'rpcId', 'method', 'payload'].includes(key))
+        || body.type !== 'client-request' || body.method !== RPC_ENDPOINT
+        || typeof body.rpcId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(body.rpcId)
+        || !Object.hasOwn(body, 'payload')) return new Response(null, { status: 400 });
+      try {
+        request.signal.throwIfAborted();
+        const value = await host.dispatch(body.payload, request.signal);
+        return Response.json({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value } },
+          { headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+      } catch { return new Response(null, { status: 500, headers: { 'cache-control': 'no-store' } }); }
+    }
+  }));
   ctx.effect(() => { void host.boot(); return () => host.dispose(); });
 }

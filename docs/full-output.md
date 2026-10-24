@@ -26,11 +26,13 @@
 
 受付・結果参照・retry・配信preflightと各part直前で元actor／conversationとNative Session／cwdを検証します。Session Bindingは会話間で一意、Binding versionで比較更新します。create中に選択が変わった場合は作成済みIDを示し、選択を上書きしたり作成を再送したりしません。
 
-## 本文保護・保持の境界（OUT-08部分対応）
+## 本文保護・保持の境界（OUT-08部分実装）
 
-制限版SQLiteにはprompt、assistant本文、part本文を平文保存しません。メモリcacheを失った場合、固定Session・startSeq・requestId・turn・terminalに一致するNative履歴だけから復元し、保存された原文digestおよび配信本文digestを検証します。欠落・別Run・digest不一致では取得不能とし、最新の別回答で代用しません。本文取得失敗時でもmetadata-only statusは既知の実行／配送状態を返せます。
+restricted-storage profileではprompt／assistant本文／part本文をSQLiteに平文保存しません。終端Runのredacted本文は、Bridge専用の`bridge-output` profileとランダムな256-bit opaque refを使い、SQLiteに準備intentを永続化してからWindows CurrentUser DPAPI payloadとして保存します。final本文chunkと配送partを個別にreadbackし、固定Native Session・Run／request・prompt digest・start/turn/sequence・actor／binding／pinned destination／deployment identityと各digestを再検証した後に、Run terminal stateとmanifestを同じSQLite transactionで公開します。取得時も同じscope／deploymentを再確認し、DPAPI read前後で期限・Run／manifestを検証します。さらに本文を返す直前、最後のNative Session authorization await後に現在のdeployment／Binding version／intent／期限／manifestを同期的に再照合し、期限をまたいだstatus／result readは`BODY_EXPIRED`で拒否します。Native履歴は公開済み本文の復元に必要ありません。正式なNative durable receipt/provenanceが得られたとは主張しません。
 
-Bridge本文参照にはterminal確定から7日の期限を設けますが、Native履歴の削除やDPAPI blobの保持・清掃ではありません。既存の[保護payload基盤](<../packages/discord-plugin/protected-payloads.js>)は20,000 code points／厳格な固定context契約で、現在の全文配送runtimeに未統合です。**長い回答を保護payloadへdurable保存し、保持期限で清掃するOUT-08全体は未完了**です。Native履歴の可用性に依存し、履歴が失われれば結果を復元できません。新たなDSH APIや架空のprovenanceを作ってこの境界を回避しません。
+本文は最大200,000 Unicode code pointsまで15,000-codepoint chunkで保持し、truncateしません。128 MiB quotaはSQLite本体・journal/WAL/SHM sidecar、実在する暗号化payload（孤立・未認識fileを含む）および未確定reservationを数え、超過や不整合では新規admission／公開をfail closedします。全partのdefinitive sent receipt後にのみ解決時刻を記録し、その7日後にmanifestに固定されたrefだけを削除します。`unknown`、未送信、blocked、曖昧なdeliveryとprepared intentは期限削除せず保持します。metadata/tombstoneの90日pruningは未実装で、unknown/orphan fileの自動削除もしません。
+
+この部分実装のfixtureは再起動時の同一payload復元、prepared partial write、receipt不明の保持、expiry／exact-ref cleanup、quota fenceとSQLite plaintext absenceを検証しますが、実電源断／process-kill全境界、複数Store・cross-process quota競合、90日metadata pruning、実Host/DiscordでのNative receiptとlive受入は未検証です。protected outputに不整合があればNative履歴や別回答で代用しません。現行runtimeの詳細と検証数は[開発状況](<development-status.md>)および[検証記録](<verification.md>)を参照してください。
 
 ## 検証
 

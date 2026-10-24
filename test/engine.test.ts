@@ -16,7 +16,7 @@ import { command } from '../src/commands.js';
 import type { AgentAdapter, SessionInfo, Snapshot, WireEvent } from '../src/types.js';
 const actor: Actor = { userId: '111111111111111111', guildId: '222222222222222222', channelId: '333333333333333333' };
 const event = (seq: number, type: string, data: Record<string, unknown>, surfaceOp?: unknown): WireEvent => ({ seq, type, data, time: 1, surfaceOp });
-function completed(requestId: string, start = 0, kind = 'completed'): WireEvent[] {
+function completed(requestId: string, start = 1, kind = 'completed'): WireEvent[] {
   return [event(start, 'turn/start', { turn: 1 }), event(start + 1, 'user/message', { role: 'user', source: { kind: 'user', rpcId: requestId }, content: [] }, 'append'),
     event(start + 2, 'assistant/message', { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'done SECRET_TOKEN' }, { type: 'reasoning', text: 'private reasoning' }] } }, 'append'),
     event(start + 3, 'turn/end', { turn: 1, reason: { kind } })];
@@ -28,7 +28,7 @@ class FakeAdapter implements AgentAdapter {
   inbox: Record<string, unknown> = { 'next-turn': [], 'next-step': [] };
   async list(): Promise<SessionInfo[]> { return this.rows; }
   async create(cwd: string): Promise<string> { this.createCalls++; this.rows.push({ sessionId: 'new', cwd, running: false, title: 'new', subagent: false, updatedAt: 1 }); return 'new'; }
-  async snapshot(): Promise<Snapshot> { if (this.readError) throw this.readError; return { cursor: this.log.at(-1)?.seq ?? -1, values: { inbox: this.inbox } }; }
+  async snapshot(): Promise<Snapshot> { if (this.readError) throw this.readError; return { cursor: this.log.at(-1)?.seq ?? 0, values: { inbox: this.inbox } }; }
   async events(_id: string, through: number, after: number): Promise<WireEvent[]> { if (this.readError) throw this.readError; return this.log.filter(e => e.seq > after && e.seq <= through); }
   async prompt(): Promise<void> { this.promptCalls++; if (this.promptError) throw this.promptError; }
 }
@@ -60,7 +60,7 @@ test('deny DM, other users, guilds and channels; exact cwd not descendants', asy
 test('existing selection and one durable prompt; duplicate interaction not resent', async t => {
   const { engine, adapter, store } = await setup(t);
   const run = await engine.submit(actor, '1', 'hello'); assert.equal(run.state, 'accepted');
-  assert.equal(store.get('1')?.lastSeq, -1); assert.equal(store.get('1')?.requestId, 'discord:1');
+  assert.equal(store.get('1')?.lastSeq, 0); assert.equal(store.get('1')?.requestId, 'discord:1');
   await engine.submit(actor, '1', 'hello'); assert.equal(adapter.promptCalls, 1);
    await assert.rejects(engine.submit(actor, '1', 'again'), { code: 'REQUEST_CONFLICT' });
    assert.equal(adapter.promptCalls, 1);
@@ -94,9 +94,9 @@ test('foreign turn does not count as our completion; mixed same-turn result is w
   const { engine, adapter, store } = await setup(t); await engine.submit(actor, '1', 'hello');
   adapter.log = completed('foreign'); await engine.tick(async () => assert.fail('not ours'));
   assert.equal(store.get('1')?.state, 'accepted'); assert.equal(store.get('1')?.output, '');
-  const ours = completed('discord:1', 4).map(e => ({ ...e, data: { ...e.data, ...(e.type.startsWith('turn/') || e.type === 'assistant/message' ? { turn: 2 } : {}) } }));
-  ours.splice(2, 0, event(6, 'user/message', { source: { kind: 'user', rpcId: 'other' } }, 'append'));
-  ours[3]!.seq = 7; ours[4]!.seq = 8; adapter.log.push(...ours);
+  const ours = completed('discord:1', 5).map(e => ({ ...e, data: { ...e.data, ...(e.type.startsWith('turn/') || e.type === 'assistant/message' ? { turn: 2 } : {}) } }));
+  ours.splice(2, 0, event(7, 'user/message', { source: { kind: 'user', rpcId: 'other' } }, 'append'));
+  ours[3]!.seq = 8; ours[4]!.seq = 9; adapter.log.push(...ours);
   await engine.tick(async run => { assert.equal(run.state, 'interrupted'); assert.equal(run.output, ''); assert.match(run.result, /混在/); });
 });
 test('turn candidate persists across polls before matching user event', async t => {
@@ -112,7 +112,7 @@ test('run target pinned after rebind; ownership enforced; allowed cwd rechecked 
   await assert.rejects(engine.status({ ...actor, userId: '555555555555555555' }, '1'), { code: 'RUN_NOT_FOUND' });
   adapter.rows[0]!.cwd = tmpdir(); await assert.rejects(engine.status(actor, '1'), { code: 'WORKSPACE_FORBIDDEN' });
   adapter.log = completed('discord:1'); await engine.tick(async () => assert.fail('forbidden disclosure'));
-  assert.equal(store.get('1')?.state, 'accepted'); assert.equal(store.get('1')?.lastSeq, -1);
+  assert.equal(store.get('1')?.state, 'accepted'); assert.equal(store.get('1')?.lastSeq, 0);
 });
 test('busy GUI/inbox prevents submission; forbidden sessions and subagents excluded', async t => {
   const { engine, adapter, dir } = await setup(t); adapter.rows[0]!.running = true;
@@ -127,8 +127,8 @@ test('explicit rejection fails, network failure does not advance cursor, cancel/
   const { engine, adapter, store } = await setup(t); adapter.promptError = new DshRejected('DSH_AUTH', 'invalid');
   assert.equal((await engine.submit(actor, '1', 'hello')).state, 'failed'); adapter.promptError = undefined;
   await engine.submit(actor, '2', 'hello'); adapter.readError = new AppError('DSH_OFFLINE', 'offline');
-  await engine.tick(async () => {}); assert.equal(store.get('2')?.lastSeq, -1); adapter.readError = undefined;
-  adapter.log = completed('discord:2', 0, 'aborted'); await engine.tick(async () => {}); assert.equal(store.get('2')?.state, 'interrupted');
+  await engine.tick(async () => {}); assert.equal(store.get('2')?.lastSeq, 0); adapter.readError = undefined;
+  adapter.log = completed('discord:2', 1, 'aborted'); await engine.tick(async () => {}); assert.equal(store.get('2')?.state, 'interrupted');
 });
 test('DM failure retained, manual retry, revoked user receives no notification', async t => {
   const { engine, adapter, store, config } = await setup(t); await engine.submit(actor, '1', 'hello'); adapter.log = completed('discord:1');
