@@ -4,12 +4,16 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { Script, createContext } from 'node:vm';
 const source = await readFile(new URL('../../packages/discord-plugin/client.js', import.meta.url), 'utf8');
-type Node = { type: unknown; props: Record<string, any>; children: any[] };
+type Node = { type: unknown; props: Record<string, any>; children: any[]; value?: any };
 function harness(call: (...args: any[]) => Promise<any>) {
   const values: any[] = [], effects: (() => void)[] = [], cleanups: (() => void)[] = [];
   let cursor = 0, component: any, tree: Node, module: any;
   const React = {
-    createElement(type: unknown, props: any, ...children: any[]): Node { return { type, props: props ?? {}, children }; },
+    createElement(type: unknown, props: any, ...children: any[]): Node {
+      const node: Node = { type, props: props ?? {}, children, value: props?.value };
+      if (props?.ref && typeof props.ref === 'object') props.ref.current = node;
+      return node;
+    },
     useState(initial: any) { const i = cursor++; if (!(i in values)) values[i] = typeof initial === 'function' ? initial() : initial; return [values[i], (next: any) => { values[i] = typeof next === 'function' ? next(values[i]) : next; }]; },
     useRef(initial: any) { const i = cursor++; if (!(i in values)) values[i] = { current: initial }; return values[i]; },
     useEffect(action: () => () => void) { const i = cursor++; if (!(i in values)) { values[i] = true; effects.push(() => cleanups.push(action())); } },
@@ -170,6 +174,20 @@ test('fresh Host null settings can save without optional token testing', async (
   assert.deepEqual(calls.map(r => r.operation), ['status', 'save']);
   assert.equal(h.id('dra-token').props.value, ''); h.unmount();
 });
+
+test('first save reads the visible token even when the input event was missed', async () => {
+  const calls: any[] = [];
+  const h = harness(async (...args) => { calls.push(args[2]); return { ok: true, value: calls.length === 1 ? { ...status(), state: 'unconfigured', tokenConfigured: false, settings: null } : status(2) }; });
+  await h.settle();
+  for (const [key, value] of Object.entries({ guildId: '11111111111111111', applicationId: '22222222222222222', allowedUserIds: '33333333333333333', allowedChannelIds: '44444444444444444' })) h.id(`dra-${key}`).props.onChange({ target: { value } });
+  h.render();
+  h.id('dra-token').props.ref.current.value = 'synthetic-only'; // Simulate password-manager/autofill value with no input/change event.
+  h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); await h.settle();
+  assert.equal(calls[1].operation, 'save');
+  assert.equal(calls[1].token, 'synthetic-only');
+  assert.equal(h.id('dra-token').props.value, ''); h.unmount();
+});
+
 for (const [field, value] of [
   ['guildId', '123'],
   ['allowedUserIds', '33333333333333333\n33333333333333333'],

@@ -314,6 +314,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
           const [draft, setDraft] = React.useState(() => retained.draft || draftFrom(null));
           const [dirty, setDirty] = React.useState(!!retained.draft);
           const [tokenInput, setTokenInput] = React.useState(retained.token);
+          const tokenInputRef = React.useRef(null);
           const [busy, setBusy] = React.useState(true);
           const [pendingOperation, setPendingOperation] = React.useState('status');
           const [uncertain, setUncertain] = React.useState(retained.uncertain);
@@ -530,8 +531,16 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
           }
           function field(label, key, options = {}) {
             const id = `dra-${key}`;
+            const handleInput = event => {
+              if (key === 'token') {
+                setConfirmCommands(false);
+                setConfirmExclusive(false);
+                updateToken(event.target.value);
+              } else edit(key, event.target.value);
+            };
             const controlProps = {
               id,
+              ...(key === 'token' ? { ref: tokenInputRef } : {}),
               className: `dra-control${options.secret ? ' dra-token' : ''}`,
               value: key === 'token' ? tokenInput : draft[key],
               disabled: busy && pendingOperation !== 'status',
@@ -540,13 +549,8 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
               spellCheck: false,
               ...(options.secret ? { type: 'password', autoComplete: 'new-password', autoCapitalize: 'off' } : {}),
               ...(options.multiline ? { rows: options.rows || 3 } : {}),
-              onChange: event => {
-                if (key === 'token') {
-                  setConfirmCommands(false);
-                  setConfirmExclusive(false);
-                  updateToken(event.target.value);
-                } else edit(key, event.target.value);
-              },
+              onChange: handleInput,
+              ...(key === 'token' ? { onInput: handleInput } : {}),
             };
             return h('div', { className: 'dra-field', key },
               h('label', { className: 'dra-label', htmlFor: id }, label),
@@ -580,7 +584,6 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
           }
           if (workspaceMap === null) errors.workspaces = t('requiredWorkspace');
           if (status && !status.tokenConfigured && !tokenInput.trim()) errors.token = t('requiredToken');
-          const formInvalid = Object.keys(errors).length > 0;
           const unsaved = dirty || tokenInput.length > 0;
           const canUseSaved = canMutate && !!status.settings && !unsaved;
           const canTest = !busy && !!status && (status.tokenConfigured || tokenInput.length > 0);
@@ -624,8 +627,13 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                 event.preventDefault();
                 setValidation(true);
                 if (!canMutate) return;
+                const submittedToken = typeof tokenInputRef.current?.value === 'string' ? tokenInputRef.current.value : tokenInput;
+                if (submittedToken !== tokenInput) updateToken(submittedToken);
+                const submissionErrors = { ...errors };
+                if (status && !status.tokenConfigured && !submittedToken.trim()) submissionErrors.token = t('requiredToken');
+                else delete submissionErrors.token;
                 if (autoStartNeedsConsent && !confirmAutoStart) { setMessage({ kind: 'error', text: t('autoStartConsentRequired') }); return; }
-                if (formInvalid) { setMessage({ kind: 'error', text: Object.values(errors)[0] }); return; }
+                if (Object.keys(submissionErrors).length > 0) { setMessage({ kind: 'error', text: Object.values(submissionErrors)[0] }); return; }
                 const request = revisionRequest('save', {
                   settings: {
                     guildId: draft.guildId.trim(),
@@ -636,7 +644,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                     autoStart: draft.autoStart === true,
                     connectionNotifications: { dm: draft.connectionDm === true, channels: draft.connectionChannels === true },
                   },
-                  ...(tokenInput.length > 0 ? { token: tokenInput } : {}),
+                  ...(submittedToken.length > 0 ? { token: submittedToken } : {}),
                 });
                 if (request) void invoke(request, 'save');
               } },
