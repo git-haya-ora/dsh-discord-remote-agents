@@ -97,7 +97,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         requiredToken: "Enter a new bot token before saving for the first time.",
         unsaved: "Save these changes first, or discard them before registering or connecting. The entered token will not be sent by those actions.",
         discard: "Discard unsaved changes",
-        optionalTest: "Optional: saving also checks the token. Testing is not required; a supplied token is cleared immediately after submission.",
+        optionalTest: "Optional: saving also checks the token. Testing retains the input for saving; saving clears it immediately after submission.",
         commandsNote: "Registration status is not stored by the Host. Register after saving when setting up or updating commands.",
         useHelp: "In an allowed Discord channel: /agent sessions → /agent bind session:<ID from list> → /agent prompt text:<your instruction> → /agent result. Replace placeholders; handle approvals on this PC.",
         title: 'Discord remote agents', intro: 'Configure the local Discord text bridge. Saving settings stops this receiver; it does not start it.',
@@ -144,7 +144,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         requiredToken: "首次保存前请输入新的 bot token。",
         unsaved: "请先保存更改，或放弃更改后再注册或连接。这些操作不会发送输入中的 token。",
         discard: "放弃未保存的更改",
-        optionalTest: "可选：保存时也会验证 token，无需先测试。提交后输入的 token 会立即清空。",
+        optionalTest: "可选：保存时也会验证 token，无需先测试。测试后保留输入以便保存；保存提交后立即清空。",
         commandsNote: "Host 不保存命令注册状态。初次设置或更新命令时，请保存后注册。",
         useHelp: "在允许的 Discord 频道：/agent sessions → /agent bind session:<列表中的ID> → /agent prompt text:<你的指示> → /agent result。请替换占位内容；审批在本机处理。",
         title: 'Discord 远程代理', intro: '配置本机 Discord 文本桥接。保存设置会停止此接收器，不会启动它。',
@@ -191,7 +191,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
         requiredToken: "初回保存前に新しいBot tokenを入力してください。",
         unsaved: "先に設定を保存するか、変更を破棄してから登録・接続してください。これらの操作は入力中のTokenを送信しません。",
         discard: "未保存の変更を破棄",
-        optionalTest: "任意です。保存時にもTokenを確認するので、事前テストは不要です。入力したTokenは送信直後に消去されます。",
+        optionalTest: "任意です。保存時にもTokenを確認するので、事前テストは不要です。テスト後は保存できるよう入力を保持し、保存の送信直後に消去します。",
         commandsNote: "Hostにはコマンド登録状態の保存がありません。初回設定・コマンド更新時は設定保存後に登録してください。",
         useHelp: "フォルダー未設定なら許可チャンネルで /agent workspace-add alias:main path:<PCの絶対パス> confirm-access:true → /agent new workspace:main → /agent prompt text:<指示>。既存Sessionは /agent sessions → /agent bind session:<ID>。結果は /agent result。<>は実際の値に置換。承認はこのPCで対応します。",
         title: 'DiscordからDSHを使う', intro: '設定を保存し、コマンドを追加してから接続します。保存だけでは接続しません。',
@@ -359,7 +359,12 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
             }
             return true;
           }
+          function readToken() {
+            return typeof tokenInputRef.current?.value === 'string' ? tokenInputRef.current.value : retained.token;
+          }
           function updateToken(value) {
+            // Uncontrolled password input: unrelated renders must not erase autofill.
+            if (tokenInputRef.current) tokenInputRef.current.value = value;
             retained.token = value;
             setTokenInput(value);
           }
@@ -451,13 +456,14 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
               setMessage({ kind: 'error', text: t('connectionUnavailable') });
               return;
             }
-            if (['start', 'registerCommands', 'reconnect'].includes(operation) && (dirtyRef.current || tokenInput.length > 0)) { setMessage({ kind: 'error', text: t('unsaved') }); return; }
+            if (['start', 'registerCommands', 'reconnect'].includes(operation) && (dirtyRef.current || readToken().length > 0)) { setMessage({ kind: 'error', text: t('unsaved') }); return; }
             busyRef.current = true;
             setBusy(true);
             setPendingOperation(operation);
             setMessage(null);
             const submittedToken = Object.hasOwn(request, 'token') ? request.token : undefined;
-            if (submittedToken !== undefined) updateToken('');
+            // Testing is read-only and must leave the candidate available for Save.
+            if (submittedToken !== undefined && operation !== 'test') updateToken('');
             if (operation !== 'test') { retained.uncertain = true; setUncertain(true); }
             const controller = new AbortController();
             pendingRequests.current.add(controller);
@@ -542,7 +548,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
               id,
               ...(key === 'token' ? { ref: tokenInputRef } : {}),
               className: `dra-control${options.secret ? ' dra-token' : ''}`,
-              value: key === 'token' ? tokenInput : draft[key],
+              ...(key === 'token' ? { defaultValue: retained.token } : { value: draft[key] }),
               disabled: busy && pendingOperation !== 'status',
               'aria-invalid': validation && !!errors[key],
               'aria-describedby': [options.hint ? `${id}-hint` : '', validation && errors[key] ? `${id}-error` : ''].filter(Boolean).join(' ') || undefined,
@@ -586,7 +592,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
           if (status && !status.tokenConfigured && !tokenInput.trim()) errors.token = t('requiredToken');
           const unsaved = dirty || tokenInput.length > 0;
           const canUseSaved = canMutate && !!status.settings && !unsaved;
-          const canTest = !busy && !!status && (status.tokenConfigured || tokenInput.length > 0);
+          const canTest = !busy && !!status; // Autofill may not dispatch an input event.
           const canStart = canUseSaved && status.tokenConfigured && confirmExclusive && !['connected', 'connecting', 'blocked', 'disposed'].includes(state);
           const canStop = canMutate && ['connected', 'connecting'].includes(state);
           const canReconnect = canUseSaved && confirmExclusive && ['connected', 'connecting'].includes(state);
@@ -627,7 +633,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                 event.preventDefault();
                 setValidation(true);
                 if (!canMutate) return;
-                const submittedToken = typeof tokenInputRef.current?.value === 'string' ? tokenInputRef.current.value : tokenInput;
+                const submittedToken = readToken();
                 if (submittedToken !== tokenInput) updateToken(submittedToken);
                 const submissionErrors = { ...errors };
                 if (status && !status.tokenConfigured && !submittedToken.trim()) submissionErrors.token = t('requiredToken');
@@ -682,7 +688,7 @@ textarea.dra-control{min-height:88px;resize:vertical;white-space:pre-wrap;overfl
                   h('button', { className: 'dra-button', type: 'submit', 'data-kind': unsaved || !status || !status.tokenConfigured ? 'primary' : undefined, disabled: !canMutate, 'aria-describedby': commonBlock ? 'dra-save-blocked' : undefined }, busy && pendingOperation === 'save' ? t('saving') : t('save'))),
                  h('details', null, h('summary', { className: 'dra-label' }, t('testToken')),
                  h('div', { className: 'dra-actions' },
-                  h('button', { className: 'dra-button', type: 'button', disabled: !canTest, onClick: () => { if (!canTest) return; void invoke({ operation: 'test', ...(tokenInput.length > 0 ? { token: tokenInput } : {}) }, 'test'); } }, busy ? t('testing') : t('testToken')),
+                  h('button', { className: 'dra-button', type: 'button', disabled: !canTest, onClick: () => { if (!canTest) return; const token = readToken(); if (!token.trim() && !status.tokenConfigured) { setMessage({ kind: 'error', text: t('requiredToken') }); return; } updateToken(token); void invoke({ operation: 'test', ...(token.length > 0 ? { token } : {}) }, 'test'); } }, busy ? t('testing') : t('testToken')),
                   h('span', { className: 'dra-hint' }, t('optionalTest'))))),
               h('section', { className: 'dra-section', 'aria-labelledby': 'dra-commands-title' },
                 h('h3', { id: 'dra-commands-title', className: 'dra-section-title' }, t('stepCommands')),

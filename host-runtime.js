@@ -74,7 +74,7 @@ async function boundedJson(response) {
 async function discordRequest(fetcher, candidate, path, init = {}, externalSignal) {
   const signal = externalSignal ? AbortSignal.any([externalSignal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000);
   let response;
-  try { response = await fetcher(`https://discord.com/api/v10${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: `Bot ${candidate}` }, signal, redirect: 'error' }); }
+  try { response = await fetcher(`https://discord.com/api/v10${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: `Bot ${candidate}`, 'user-agent': 'DiscordBot (https://github.com/git-haya-ora/dsh-discord-remote-agents, 0.2.0-restricted.8)' }, signal, redirect: 'error' }); }
   catch { fail('DISCORD_OFFLINE'); }
   if (!response.ok) { await response.body?.cancel(); fail(response.status === 401 ? 'DISCORD_AUTH' : response.status === 403 ? 'DISCORD_FORBIDDEN' : 'DISCORD_HTTP'); }
   return boundedJson(response);

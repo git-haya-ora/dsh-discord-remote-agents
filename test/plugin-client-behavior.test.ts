@@ -7,10 +7,12 @@ const source = await readFile(new URL('../../packages/discord-plugin/client.js',
 type Node = { type: unknown; props: Record<string, any>; children: any[]; value?: any };
 function harness(call: (...args: any[]) => Promise<any>) {
   const values: any[] = [], effects: (() => void)[] = [], cleanups: (() => void)[] = [];
+  const controls = new Map<string, Node>();
   let cursor = 0, component: any, tree: Node, module: any;
   const React = {
     createElement(type: unknown, props: any, ...children: any[]): Node {
-      const node: Node = { type, props: props ?? {}, children, value: props?.value };
+      const node: Node = { type, props: props ?? {}, children, value: props?.value ?? controls.get(props?.id)?.value ?? props?.defaultValue };
+      if (props?.id) controls.set(props.id, node);
       if (props?.ref && typeof props.ref === 'object') props.ref.current = node;
       return node;
     },
@@ -64,7 +66,7 @@ test('Japanese page selection translates actions without RPC, persistence, or lo
   h.id('dra-language').props.onChange({ target: { value: 'ja' } }); h.render();
   assert.ok(h.all().some(n => n.children.includes('DiscordからDSHを使う')));
   assert.equal(h.button('設定を保存').props.disabled, false);
-  assert.equal(h.id('dra-token').props.value, 'synthetic-input-only');
+  assert.equal(h.id('dra-token').value, 'synthetic-input-only');
   assert.deepEqual(calls.map(r => r.operation), ['status']);
   h.id('dra-language').props.onChange({ target: { value: '__proto__' } }); h.render();
   assert.equal(h.id('dra-language').props.value, 'ja');
@@ -97,7 +99,7 @@ test('rendered settings consent and save send revision, write-only token, and pr
   h.id('dra-confirm-auto-start').props.onChange({ target: { checked: true } });
   h.id('dra-workspace-0-alias').props.onChange({ target: { value: '__proto__' } });
   h.id('dra-token').props.onChange({ target: { value: 'synthetic-input-only' } }); h.render();
-  submit(); h.render(); assert.equal(h.id('dra-token').props.value, ''); await h.settle();
+  submit(); h.render(); assert.equal(h.id('dra-token').value, ''); await h.settle();
   assert.equal(calls.length, 2); const [channel, endpoint, request, signal] = calls[1]!;
   assert.equal(channel, '/api'); assert.equal(endpoint, 'discord-remote-agents.manage'); assert.ok(signal instanceof AbortSignal);
   assert.equal(request.operation, 'save'); assert.equal(request.expectedRevision, 1); assert.equal(request.settings.autoStart, true);
@@ -135,8 +137,8 @@ for (const operation of ['refresh', 'start'] as const) test(`unmount aborts pend
  const calls: any[] = []; const h = harness(async (...args) => { calls.push(args[2]); return { ok: true, value: { ...status(), state: 'connected' } }; }); await h.settle();
  h.id('dra-confirm-commands').props.onChange({ target: { checked: true } }); h.id('dra-confirm-exclusive').props.onChange({ target: { checked: true } }); h.id('dra-token').props.onChange({ target: { value: 'synthetic-only' } }); h.render();
  for (const key of ['start', 'registerCommands', 'reconnect']) { assert.equal(h.button(key).props.disabled, true); h.button(key).props.onClick(); }
- await h.settle(); assert.equal(calls.length, 1); assert.equal(h.id('dra-token').props.value, 'synthetic-only');
- h.button('discard').props.onClick(); h.render(); assert.equal(h.id('dra-token').props.value, '');
+ await h.settle(); assert.equal(calls.length, 1); assert.equal(h.id('dra-token').value, 'synthetic-only');
+ h.button('discard').props.onClick(); h.render(); assert.equal(h.id('dra-token').value, '');
  h.id('dra-confirm-exclusive').props.onChange({ target: { checked: true } }); h.render(); h.button('reconnect').props.onClick(); await h.settle();
  assert.equal(calls[1].confirmation, true); assert.equal(calls[1].expectedRevision, 1); assert.equal(h.id('dra-confirm-exclusive').props.checked, false); h.unmount();
  });
@@ -154,12 +156,12 @@ for (const operation of ['refresh', 'start'] as const) test(`unmount aborts pend
  assert.equal(Object.getPrototypeOf(calls[1].settings.workspaces), null); assert.equal(calls[1].settings.workspaces['second_name'], 'D:\\Two');
  assert.deepEqual(Array.from(calls[1].settings.allowedUserIds), ['33333333333333333', '55555555555555555']); assert.deepEqual(Array.from(calls[1].settings.allowedChannelIds), ['44444444444444444', '66666666666666666']); h.unmount();
  });
- for (const operation of ['save', 'test', 'deleteSecret', 'registerCommands', 'reconnect'] as const) test(`pending ${operation} is aborted on unmount; secret submissions clear immediately`, async () => {
+ for (const operation of ['save', 'test', 'deleteSecret', 'registerCommands', 'reconnect'] as const) test(`pending ${operation} is aborted on unmount; only save consumes the candidate`, async () => {
  let signal: AbortSignal | undefined, calls = 0; const h = harness(async (...args) => { calls++; if (calls === 1) return { ok: true, value: { ...status(), state: 'connected' } }; signal = args[3]; return await new Promise(() => {}); }); await h.settle();
  if (operation === 'save' || operation === 'test') { h.id('dra-token').props.onChange({ target: { value: 'synthetic-only' } }); h.render(); }
  if (operation === 'save') h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} });
  else { if (operation === 'deleteSecret') h.id('dra-confirm-delete').props.onChange({ target: { checked: true } }); if (operation === 'registerCommands') h.id('dra-confirm-commands').props.onChange({ target: { checked: true } }); if (operation === 'reconnect') h.id('dra-confirm-exclusive').props.onChange({ target: { checked: true } }); h.render(); h.button(operation === 'test' ? 'testToken' : operation).props.onClick(); }
- h.render(); assert.ok(signal); if (operation === 'save' || operation === 'test') assert.equal(h.id('dra-token').props.value, ''); h.unmount(); assert.equal(signal.aborted, true); assert.equal(calls, 2);
+ h.render(); assert.ok(signal); if (operation === 'save' || operation === 'test') assert.equal(h.id('dra-token').value, operation === 'test' ? 'synthetic-only' : ''); h.unmount(); assert.equal(signal.aborted, true); assert.equal(calls, 2);
  });
 
 test('fresh Host null settings can save without optional token testing', async () => {
@@ -172,7 +174,7 @@ test('fresh Host null settings can save without optional token testing', async (
   h.render(); // First setup deliberately leaves both optional folder fields blank.
   h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); await h.settle();
   assert.deepEqual(calls.map(r => r.operation), ['status', 'save']);
-  assert.equal(h.id('dra-token').props.value, ''); h.unmount();
+  assert.equal(h.id('dra-token').value, ''); h.unmount();
 });
 
 test('first save reads the visible token even when the input event was missed', async () => {
@@ -185,7 +187,7 @@ test('first save reads the visible token even when the input event was missed', 
   h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); await h.settle();
   assert.equal(calls[1].operation, 'save');
   assert.equal(calls[1].token, 'synthetic-only');
-  assert.equal(h.id('dra-token').props.value, ''); h.unmount();
+  assert.equal(h.id('dra-token').value, ''); h.unmount();
 });
 
 for (const [field, value] of [
@@ -197,7 +199,7 @@ for (const [field, value] of [
   let calls = 0; const h = harness(async () => { calls++; return { ok: true, value: status() }; }); await h.settle();
   h.id(`dra-${field}`).props.onChange({ target: { value } }); h.id('dra-token').props.onChange({ target: { value: 'synthetic-only' } }); h.render();
   h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); h.render();
-  assert.equal(calls, 1); assert.equal(h.id('dra-token').props.value, 'synthetic-only');
+  assert.equal(calls, 1); assert.equal(h.id('dra-token').value, 'synthetic-only');
   assert.equal(h.id(`dra-${field}`).props['aria-invalid'], true); h.unmount();
 });
 
@@ -214,7 +216,7 @@ test('status timeout releases controls, retains input, and supports explicit ret
   assert.equal(h.id('dra-guildId').props.value, '55555555555555555');
   h.button('retryStatus').props.onClick(); await h.settle();
   assert.equal(h.button('save').props.disabled, false);
-  assert.equal(h.id('dra-token').props.value, 'synthetic-only');
+  assert.equal(h.id('dra-token').value, 'synthetic-only');
   resolveLate({ ok: true, value: status(99) }); await h.settle();
   assert.equal(h.id('dra-guildId').props.value, '55555555555555555');
   assert.equal(h.timerCount(), 0); h.unmount();
@@ -228,13 +230,13 @@ test('draft and candidate token survive page remount but action confirmations do
   h.id('dra-confirm-exclusive').props.onChange({ target: { checked: true } });
   h.remount(); await h.settle();
   assert.equal(h.id('dra-guildId').props.value, '55555555555555555');
-  assert.equal(h.id('dra-token').props.value, 'synthetic-only');
+  assert.equal(h.id('dra-token').value, 'synthetic-only');
   assert.equal(h.id('dra-confirm-exclusive').props.checked, false);
   assert.equal(h.button('start').props.disabled, true);
   assert.deepEqual(calls.map(r => r.operation), ['status', 'status']);
   h.button('discard').props.onClick(); h.remount(); await h.settle();
   assert.equal(h.id('dra-guildId').props.value, status().settings.guildId);
-  assert.equal(h.id('dra-token').props.value, ''); h.unmount();
+  assert.equal(h.id('dra-token').value, ''); h.unmount();
 });
 
 test('returning settings to their saved value removes the dirty gate without saving', async () => {
@@ -279,7 +281,7 @@ test('missing RPC is a known local failure and preserves an unsubmitted token', 
   h.id('dra-token').props.onChange({ target: { value: 'synthetic-only' } }); h.render(); h.disconnect();
   h.all().find(n => n.type === 'form')!.props.onSubmit({ preventDefault() {} }); await h.settle();
   assert.equal(calls, 1);
-  assert.equal(h.id('dra-token').props.value, 'synthetic-only');
+  assert.equal(h.id('dra-token').value, 'synthetic-only');
   assert.ok(h.all().some(n => n.children.includes('connectionUnavailable')));
   assert.ok(!h.all().some(n => n.children.includes('resultUnknown')));
   assert.equal(h.button('save').props.disabled, false); h.unmount();

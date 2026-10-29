@@ -34,6 +34,7 @@ async function setup(t: { after(fn: () => unknown): void }, prepareRoot?: () => 
       async readMany() { return []; }, async stats() { return { bytes: 0, files: [] }; }, async delete() {}, async deleteMany(refs: string[]) { return refs.map(ref => ({ ref, deleted: false, bytes: 0 })); }
     },
     fetcher: async (url: string, init?: RequestInit) => {
+      assert.equal(new Headers(init?.headers).get('user-agent'), 'DiscordBot (https://github.com/git-haya-ora/dsh-discord-remote-agents, 0.2.0-restricted.8)');
       if (url.endsWith('/commands')) {
         const body = JSON.parse(String(init?.body)) as { name?: string };
         commandRequests.push({ url, method: init?.method, body });

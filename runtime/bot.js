@@ -35,6 +35,9 @@ export class DiscordBot {
     workingNoticeAbort = new AbortController();
     terminalNoticeAbort = new AbortController();
     connectionNoticeTask;
+    // The raced metadata operation can still access the Store after the caller
+    // times out or aborts; keep it alive and drain it before closing the Store.
+    connectionMetadataTasks = new Set();
     stopTask;
     connectionNoticeId = randomUUID();
     handling = new Set();
@@ -52,6 +55,8 @@ export class DiscordBot {
         });
         this.client.on(Events.Error, () => console.error('[DISCORD_CONNECTION_ERROR] Discordへの接続を確認してください。'));
         this.client.once(Events.ClientReady, () => {
+            if (this.stopping)
+                return;
             console.log('[READY] Bot接続済み。操作は許可ユーザー・チャンネル限定です。');
             this.tick();
             this.timer = setInterval(() => this.tick(), this.config.pollIntervalMs);
@@ -109,7 +114,19 @@ export class DiscordBot {
                 const target = kind === 'dm' ? await this.waitForConnectionNoticeOperation(this.client.users.fetch(id)) : await this.waitForConnectionNoticeOperation(this.client.channels.fetch(id));
                 if (!target || kind === 'channel' && (!('isSendable' in target) || !target.isSendable() || !('guildId' in target) || target.guildId !== this.config.guildId))
                     throw new AppError('DELIVERY_BLOCKED', '通知先を確認できません。');
-                const notice = await this.waitForConnectionNoticeOperation(connectionNotice(this.engine, this.config, actors));
+                const metadataTask = connectionNotice(this.engine, this.config, actors);
+                this.connectionMetadataTasks.add(metadataTask);
+                void metadataTask.then(() => this.connectionMetadataTasks.delete(metadataTask), () => this.connectionMetadataTasks.delete(metadataTask));
+                const notice = await this.waitForConnectionNoticeOperation(metadataTask);
+                // User.send() opens a DM internally before sending; separate that await so
+                // stop, authorization and binding changes are checked before disclosure.
+                notice.assertCurrent();
+                if (this.stopping || !this.client.isReady())
+                    throw new AppError('DELIVERY_BLOCKED', '通知は停止されました。');
+                if (kind === 'dm' && !('createDM' in target))
+                    throw new AppError('DELIVERY_BLOCKED', 'DM先を確認できません。');
+                const destination = kind === 'dm' && 'createDM' in target
+                    ? await this.waitForConnectionNoticeOperation(target.createDM()) : target;
                 notice.assertCurrent();
                 if (this.stopping || !this.client.isReady() || !(kind === 'dm' ? this.config.connectionNotifications?.dm : this.config.connectionNotifications?.channels))
                     throw new AppError('DELIVERY_BLOCKED', '通知は停止されました。');
@@ -117,7 +134,7 @@ export class DiscordBot {
                     return;
                 // Persist the uncertainty fence before Discord may accept a message. No body is stored.
                 this.engine.store.setSetting(key, JSON.stringify({ state: 'unknown' }));
-                const send = target;
+                const send = destination;
                 const receipt = await this.waitForConnectionNoticeOperation(send.send({ content: notice.content, allowedMentions: { parse: [] }, flags: MessageFlags.SuppressEmbeds,
                     nonce: digest(key).slice(0, 24), enforceNonce: true }));
                 if (!receipt || typeof receipt.id !== 'string' || !/^\d{17,20}$/.test(receipt.id))
@@ -206,8 +223,12 @@ export class DiscordBot {
             this.engine.policy.authorize(run.userId, run.guildId, run.channelId);
             if (this.stopping || !this.client.isReady())
                 throw new AppError('DELIVERY_BLOCKED', '作業開始通知は停止されています。');
+            const dm = await this.waitForWorkingNoticeOperation(user.createDM(), false);
+            this.engine.policy.authorize(run.userId, run.guildId, run.channelId);
+            if (this.stopping || !this.client.isReady())
+                throw new AppError('DELIVERY_BLOCKED', '作業開始通知は停止されています。');
             sendStarted = true;
-            const sent = await this.waitForWorkingNoticeOperation(user.send(options), true);
+            const sent = await this.waitForWorkingNoticeOperation(dm.send(options), true);
             if (!/^\d{17,20}$/u.test(sent.id))
                 throw new AppError('NOTIFICATION_UNKNOWN', '作業開始通知の受領を確認できません。');
             return { messageId: sent.id };
@@ -280,7 +301,11 @@ export class DiscordBot {
             this.engine.policy.authorize(run.userId, run.guildId, run.channelId);
             if (this.stopping || this.terminalNoticeAbort.signal.aborted)
                 throw new AppError('DELIVERY_BLOCKED', '通知は停止されています。');
-            const sent = await this.waitForTerminalNoticeOperation(user.send(options), true);
+            const dm = await this.waitForTerminalNoticeOperation(user.createDM(), false);
+            this.engine.policy.authorize(run.userId, run.guildId, run.channelId);
+            if (this.stopping || this.terminalNoticeAbort.signal.aborted)
+                throw new AppError('DELIVERY_BLOCKED', '通知は停止されています。');
+            const sent = await this.waitForTerminalNoticeOperation(dm.send(options), true);
             return { messageId: sent.id };
         }
         catch (error) {
@@ -290,13 +315,15 @@ export class DiscordBot {
             if (this.textOnly || part) {
                 if (error instanceof RateLimitError) {
                     const rateLimit = new AppError('DELIVERY_RATE_LIMIT', 'Discordの指定待機後に再試行します。');
-                    Object.assign(rateLimit, { retryAfterMs: Number.isFinite(error.retryAfter) && error.retryAfter >= 0 ? Math.ceil(error.retryAfter) : NaN });
+                    Object.assign(rateLimit, { retryAfterMs: Number.isFinite(error.retryAfter) && error.retryAfter > 0 && Number.isSafeInteger(Math.ceil(error.retryAfter)) ? Math.ceil(error.retryAfter) : NaN });
                     throw rateLimit;
                 }
                 if (raw.status === 429) {
-                    const seconds = Number(raw.retry_after ?? raw.rawError?.retry_after);
+                    const value = raw.retry_after ?? raw.rawError?.retry_after;
+                    const seconds = typeof value === 'number' ? value : NaN;
+                    const milliseconds = Math.ceil(seconds * 1000);
                     const rateLimit = new AppError('DELIVERY_RATE_LIMIT', 'Discordの指定待機後に再試行します。');
-                    Object.assign(rateLimit, { retryAfterMs: Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds * 1000) : NaN });
+                    Object.assign(rateLimit, { retryAfterMs: seconds > 0 && Number.isSafeInteger(milliseconds) ? milliseconds : NaN });
                     throw rateLimit;
                 }
                 if ([50007, 50013, 50001, 10003, 10013].includes(Number(raw.code)) || raw.status === 403 || raw.status === 401)
@@ -307,24 +334,49 @@ export class DiscordBot {
         }
     }
     async handle(interaction) {
+        const replyFailed = () => console.error('[INTERACTION_REPLY_FAILED] 返信できません。実行IDは/agent statusで確認できます。');
         try {
             this.engine.policy.authorize(interaction.user.id, interaction.guildId, interaction.channelId);
-            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-            const { content, files = [] } = await handleAgentCommand(interaction, this.engine, this.config, this.textOnly);
-            this.engine.policy.authorize(interaction.user.id, interaction.guildId, interaction.channelId);
-            await interaction.editReply({ content, files: this.textOnly ? [] : files, allowedMentions: { parse: [] }, flags: MessageFlags.SuppressEmbeds });
         }
         catch (error) {
-            const content = safeError(error);
             try {
-                if (interaction.deferred || interaction.replied)
-                    await interaction.editReply({ content, allowedMentions: { parse: [] } });
-                else
-                    await interaction.reply({ content, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+                await interaction.reply({ content: safeError(error), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
             }
             catch {
-                console.error('[INTERACTION_REPLY_FAILED] 返信できません。実行IDは/agent statusで確認できます。');
+                replyFailed();
             }
+            return;
+        }
+        // A rejected acknowledgement may nevertheless have reached Discord: never send a second ACK.
+        try {
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        }
+        catch {
+            replyFailed();
+            return;
+        }
+        if (this.stopping)
+            return;
+        let payload;
+        try {
+            payload = await handleAgentCommand(interaction, this.engine, this.config, this.textOnly);
+            this.engine.policy.authorize(interaction.user.id, interaction.guildId, interaction.channelId);
+        }
+        catch (error) {
+            try {
+                await interaction.editReply({ content: safeError(error), allowedMentions: { parse: [] } });
+            }
+            catch {
+                replyFailed();
+            }
+            return;
+        }
+        // An edit failure is also ambiguous; do not overwrite a possibly delivered result.
+        try {
+            await interaction.editReply({ content: payload.content, files: this.textOnly ? [] : payload.files ?? [], allowedMentions: { parse: [] }, flags: MessageFlags.SuppressEmbeds });
+        }
+        catch {
+            replyFailed();
         }
     }
     async stop() {
@@ -340,6 +392,7 @@ export class DiscordBot {
             await Promise.allSettled([...this.handling]);
             await this.pendingTick;
             await this.connectionNoticeTask;
+            await Promise.allSettled([...this.connectionMetadataTasks]);
             await this.client.destroy();
         })();
         return this.stopTask;

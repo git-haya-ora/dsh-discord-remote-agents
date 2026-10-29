@@ -22,7 +22,7 @@ async function fixture(t: { after(fn: () => unknown): void }, dm = false, channe
   Object.defineProperty(bot.client, 'isReady', { value: () => true });
   const messages: {kind: string; options: any}[] = [];
   const send = (kind: string) => async (options: any) => { messages.push({ kind, options }); return { id: '555555555555555555' }; };
-  Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: async () => ({ send: send('dm') }) });
+  Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: async () => ({ createDM: async () => ({ send: send('dm') }) }) });
   Object.defineProperty(bot.client.channels, 'fetch', { configurable: true, value: async () => ({ guildId, isSendable: () => true, send: send('channel') }) });
   t.after(async () => { await bot.stop(); store.close(); });
   return { config, engine, bot, actor, sessions, messages, prompts: () => prompts, lists: () => lists };
@@ -61,6 +61,24 @@ for (const status of [503, 429]) test(`Discord SDK does not retry notice-route P
     });
   }
   assert.equal(calls, 1); assert.equal(f.bot.client.rest.options.retries, 0); assert.equal(f.prompts(), 0);
+});
+test('429 with body-only retry_after has unknown wait and is not treated as immediately retryable', async t => {
+  const f = await fixture(t, true); let calls = 0;
+  f.bot.client.rest.setToken('synthetic-test-token');
+  f.bot.client.rest.options.makeRequest = async () => {
+    calls++; const body = { message: 'synthetic', retry_after: 60, global: false };
+    return { status: 429, statusText: 'Synthetic', ok: false, body: null, bodyUsed: false,
+      headers: new Headers({ 'content-type': 'application/json' }) as unknown as ResponseLike['headers'],
+      json: async () => body, text: async () => JSON.stringify(body), arrayBuffer: async () => new ArrayBuffer(0) };
+  };
+  let rejection: unknown;
+  await assert.rejects(f.bot.client.rest.post(`/channels/${channelId}/messages`, { body: { content: 'synthetic' } }), error => { rejection = error; return true; });
+  Object.defineProperty(f.bot.client.users, 'fetch', { value: async () => { throw rejection; } });
+  await assert.rejects(f.bot.notify({ id: 'fixture-run', userId, guildId, channelId } as Run, { index: 1, content: 'synthetic' }), error => {
+    assert.equal((error as { code: string }).code, 'DELIVERY_RATE_LIMIT');
+    assert.ok(Number.isNaN((error as { retryAfterMs: number }).retryAfterMs)); return true;
+  });
+  assert.equal(calls, 1);
 });
 test('unselected means no selection, never the newest Native Session; no history or prompt fetch', async t => {
   const f = await fixture(t, true); await f.bot.notifyConnected();
@@ -103,9 +121,9 @@ test('uncertainty is durable before a send and only receipt metadata, never mess
   const f = await fixture(t, true); const writes: any[] = [];
   const original = f.engine.store.setSetting.bind(f.engine.store);
   f.engine.store.setSetting = (key, value) => { writes.push(JSON.parse(value)); original(key, value); };
-  Object.defineProperty(f.bot.client.users, 'fetch', { value: async () => ({ send: async () => {
+  Object.defineProperty(f.bot.client.users, 'fetch', { value: async () => ({ createDM: async () => ({ send: async () => {
     assert.deepEqual(writes.at(-1), { state: 'unknown' }); return { id: '555555555555555555' };
-  } }) });
+  } }) }) });
   assert.deepEqual(await f.bot.notifyConnected(), { sent: 1, failed: 0 });
   assert.deepEqual(writes, [{ state: 'unknown' }, { state: 'sent', messageId: '555555555555555555' }]);
 });
@@ -115,13 +133,13 @@ test('missing last-used model is not inferred from next model or treated as curr
 });
 test('DM ambiguity is never retried or redirected and is not a Native execution', async t => {
   const f = await fixture(t, true); let attempts = 0;
-  Object.defineProperty(f.bot.client.users, 'fetch', { value: async () => ({ send: async () => { attempts++; throw Error('synthetic-private-error'); } }) });
+  Object.defineProperty(f.bot.client.users, 'fetch', { value: async () => ({ createDM: async () => ({ send: async () => { attempts++; throw Error('synthetic-private-error'); } }) }) });
   assert.deepEqual(await f.bot.notifyConnected(), { sent: 0, failed: 1 }); await f.bot.notifyConnected();
   assert.equal(attempts, 1); assert.equal(f.messages.length, 0); assert.equal(f.prompts(), 0);
 });
 test('actor revoked during destination lookup cannot receive connection or Session metadata', async t => {
   const f = await fixture(t, true);
-  Object.defineProperty(f.bot.client.users, 'fetch', { value: async () => { f.config.allowedUserIds.clear(); return { send: async () => { throw Error('Must not send'); } }; } });
+  Object.defineProperty(f.bot.client.users, 'fetch', { value: async () => { f.config.allowedUserIds.clear(); return { createDM: async () => ({ send: async () => { throw Error('Must not send'); } }) }; } });
   assert.deepEqual(await f.bot.notifyConnected(), { sent: 0, failed: 1 }); assert.equal(f.messages.length, 0);
 });
 test('wrong-guild channel cannot receive metadata and is not replaced with DM', async t => {
@@ -143,18 +161,71 @@ test('binding ABA or authorization changes after building metadata invalidate it
   const current = await connectionNotice(f.engine, f.config, [f.actor]); f.config.allowedChannelIds.clear(); assert.throws(() => current.assertCurrent(), { code: 'NOT_AUTHORIZED' });
 });
 
+test('stop drains blocked connection metadata after notice abort before store close', { timeout: 5000 }, async t => {
+  const f = await fixture(t, true); await f.engine.bind(f.actor, 'selected-session');
+  let started!: () => void, release!: () => void;
+  const nativeStarted = new Promise<void>(resolve => { started = resolve; });
+  const nativeRelease = new Promise<void>(resolve => { release = resolve; });
+  const selectedSession = f.engine.selectedSession.bind(f.engine);
+  f.engine.selectedSession = async actor => {
+    started(); await nativeRelease;
+    return selectedSession(actor);
+  };
+  let closed = false, afterClose = 0, resumedReads = 0;
+  const binding = f.engine.store.binding.bind(f.engine.store), bindingVersion = f.engine.store.bindingVersion.bind(f.engine.store);
+  f.engine.store.binding = key => { if (closed) afterClose++; else resumedReads++; return binding(key); };
+  f.engine.store.bindingVersion = key => { if (closed) afterClose++; else resumedReads++; return bindingVersion(key); };
+  let destroys = 0;
+  Object.defineProperty(f.bot.client, 'destroy', { configurable: true, value: async () => { destroys++; } });
+  const notice = f.bot.notifyConnected(); await nativeStarted;
+  const readsBeforeRelease = resumedReads;
+  let stopped = false;
+  const stop = f.bot.stop().then(() => { stopped = true; });
+  try {
+    assert.deepEqual(await notice, { sent: 0, failed: 1 });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(stopped, false); assert.equal(destroys, 0);
+  } finally {
+    release();
+    await stop;
+  }
+  assert.equal(stopped, true); assert.equal(destroys, 1);
+  assert.ok(resumedReads > readsBeforeRelease, 'selectedSession resumes its store checks before stop completes');
+  f.engine.store.close(); closed = true;
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(afterClose, 0); assert.equal(f.messages.length, 0); assert.equal(f.prompts(), 0);
+});
+
 test('stop does not wait for blocked recipient lookup and late lookup cannot initiate a send', async t => {
-  const f = await fixture(t, true); let release!: (value: { id: string; send(options: unknown): Promise<{ id: string }> }) => void;
+  const f = await fixture(t, true); let release!: (value: { id: string; createDM(): Promise<{ send(options: unknown): Promise<{ id: string }> }> }) => void;
   let started!: () => void; const lookupStarted = new Promise<void>(resolve => { started = resolve; });
-  const lookup = new Promise<{ id: string; send(options: unknown): Promise<{ id: string }> }>(resolve => { release = resolve; });
+  const lookup = new Promise<{ id: string; createDM(): Promise<{ send(options: unknown): Promise<{ id: string }> }> }>(resolve => { release = resolve; });
   let sends = 0, destroys = 0;
   Object.defineProperty(f.bot.client.users, 'fetch', { configurable: true, value: () => { started(); return lookup; } });
   Object.defineProperty(f.bot.client, 'destroy', { configurable: true, value: async () => { destroys++; } });
   const notice = f.bot.notifyConnected(); await lookupStarted;
   const stopped = await Promise.race([f.bot.stop().then(() => true), new Promise<boolean>(resolve => setTimeout(() => resolve(false), 250))]);
   assert.equal(stopped, true); assert.equal(destroys, 1);
-  release({ id: userId, send: async () => { sends++; return { id: '555555555555555555' }; } });
+  release({ id: userId, createDM: async () => ({ send: async () => { sends++; return { id: '555555555555555555' }; } }) });
   assert.deepEqual(await notice, { sent: 0, failed: 1 }); assert.equal(sends, 0); assert.equal(f.prompts(), 0);
+});
+
+for (const action of ['stop', 'revoke'] as const) test(`connection notice cannot send after ${action} during createDM`, async t => {
+  const f = await fixture(t, true); let release!: (channel: { send(): Promise<{ id: string }> }) => void;
+  let started!: () => void; const opening = new Promise<void>(resolve => { started = resolve; });
+  const dm = new Promise<{ send(): Promise<{ id: string }> }>(resolve => { release = resolve; });
+  let sends = 0;
+  Object.defineProperty(f.bot.client.users, 'fetch', { configurable: true, value: async () => ({ createDM: () => { started(); return dm; } }) });
+  Object.defineProperty(f.bot.client, 'destroy', { configurable: true, value: async () => {} });
+  const notice = f.bot.notifyConnected(); await opening;
+  if (action === 'stop') {
+    let deadline: NodeJS.Timeout | undefined;
+    const stopped = await Promise.race([f.bot.stop().then(() => true), new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), 250); })]);
+    if (deadline) clearTimeout(deadline); assert.equal(stopped, true);
+  } else f.config.allowedUserIds.clear();
+  release({ send: async () => { sends++; return { id: '555555555555555555' }; } });
+  assert.deepEqual(await notice, { sent: 0, failed: 1 });
+  await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(sends, 0);
 });
 
 test('stop returns during blocked send and keeps durable unknown fence after late success', async t => {
@@ -163,7 +234,7 @@ test('stop returns during blocked send and keeps durable unknown fence after lat
   const blockedSend = new Promise<{ id: string }>(resolve => { release = resolve; });
   const writes: Array<{ state: string; messageId?: string }> = []; const setSetting = f.engine.store.setSetting.bind(f.engine.store);
   f.engine.store.setSetting = (key, value) => { writes.push(JSON.parse(value) as { state: string; messageId?: string }); setSetting(key, value); };
-  Object.defineProperty(f.bot.client.users, 'fetch', { configurable: true, value: async () => ({ send: () => { started(); return blockedSend; } }) });
+  Object.defineProperty(f.bot.client.users, 'fetch', { configurable: true, value: async () => ({ createDM: async () => ({ send: () => { started(); return blockedSend; } }) }) });
   Object.defineProperty(f.bot.client, 'destroy', { configurable: true, value: async () => {} });
   const notice = f.bot.notifyConnected(); await sendStarted;
   const stopped = await Promise.race([f.bot.stop().then(() => true), new Promise<boolean>(resolve => setTimeout(() => resolve(false), 250))]);

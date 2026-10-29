@@ -147,9 +147,9 @@ test('restart/replay retains sent and unknown markers and never auto-resends', a
 test('actual tick stop aborts a blocked working-notice lookup and ignores its late result', async t => {
   const { config, engine, adapter, store } = await setup(t); adapter.log.push(...runStart('discord:working-run'));
   const bot = new DiscordBot(config, engine, undefined, true); Object.defineProperty(bot.client, 'isReady', { value: () => true });
-  let release!: (value: { id: string; send(options: unknown): Promise<{ id: string }> }) => void;
+  let release!: (value: { id: string; createDM(): Promise<{ send(options: unknown): Promise<{ id: string }> }> }) => void;
   let started!: () => void; const lookupStarted = new Promise<void>(resolve => { started = resolve; });
-  const lookup = new Promise<{ id: string; send(options: unknown): Promise<{ id: string }> }>(resolve => { release = resolve; });
+  const lookup = new Promise<{ id: string; createDM(): Promise<{ send(options: unknown): Promise<{ id: string }> }> }>(resolve => { release = resolve; });
   let sends = 0, destroys = 0;
   Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: () => { started(); return lookup; } });
   Object.defineProperty(bot.client, 'destroy', { configurable: true, value: async () => { destroys++; } });
@@ -159,9 +159,29 @@ test('actual tick stop aborts a blocked working-notice lookup and ignores its la
   const stopped = await Promise.race([bot.stop().then(() => true), new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), 250); })]);
   if (deadline) clearTimeout(deadline);
   assert.equal(stopped, true); assert.equal(destroys, 1); assert.equal(store.get('working-run')?.workNotice, 'blocked');
-  release({ id: actor.userId, send: async () => { sends++; return { id: '55555555555555555' }; } });
+  release({ id: actor.userId, createDM: async () => ({ send: async () => { sends++; return { id: '55555555555555555' }; } }) });
   await Promise.resolve(); (bot as unknown as { tick(): void }).tick();
   assert.equal(sends, 0); assert.equal(store.get('working-run')?.workNotice, 'blocked');
+});
+
+for (const action of ['stop', 'revoke'] as const) test(`working notice cannot send after ${action} during createDM`, async t => {
+  const { config, engine, store } = await setup(t);
+  const bot = new DiscordBot(config, engine, undefined, true); Object.defineProperty(bot.client, 'isReady', { value: () => true });
+  Object.defineProperty(bot.client, 'destroy', { configurable: true, value: async () => {} }); t.after(() => bot.stop());
+  let release!: (channel: { send(): Promise<{ id: string }> }) => void; let started!: () => void;
+  const opening = new Promise<void>(resolve => { started = resolve; });
+  const dm = new Promise<{ send(): Promise<{ id: string }> }>(resolve => { release = resolve; }); let sends = 0;
+  Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: async () => ({ id: actor.userId, createDM: () => { started(); return dm; } }) });
+  const notice = bot.notifyWorking(store.get('working-run')!); const result = notice.then(() => undefined, error => error);
+  await opening;
+  if (action === 'stop') {
+    let deadline: NodeJS.Timeout | undefined;
+    const stopped = await Promise.race([bot.stop().then(() => true), new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), 250); })]);
+    if (deadline) clearTimeout(deadline); assert.equal(stopped, true);
+  } else config.allowedUserIds.clear();
+  release({ send: async () => { sends++; return { id: '55555555555555555' }; } });
+  assert.equal((await result as AppError).code, action === 'stop' ? 'DELIVERY_BLOCKED' : 'NOT_AUTHORIZED');
+  await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(sends, 0);
 });
 
 test('actual tick stop returns during working-notice send and retains unknown without retry', async t => {
@@ -171,7 +191,7 @@ test('actual tick stop returns during working-notice send and retains unknown wi
   const sendStarted = new Promise<void>(resolve => { started = resolve; });
   const blockedSend = new Promise<{ id: string }>(resolve => { release = resolve; });
   let sends = 0, destroys = 0;
-  Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: async () => ({ id: actor.userId, send: () => { sends++; started(); return blockedSend; } }) });
+  Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: async () => ({ id: actor.userId, createDM: async () => ({ send: () => { sends++; started(); return blockedSend; } }) }) });
   Object.defineProperty(bot.client, 'destroy', { configurable: true, value: async () => { destroys++; } });
   t.after(() => bot.stop());
   (bot as unknown as { tick(): void }).tick(); await sendStarted;
@@ -192,9 +212,9 @@ test('actual tick stop returns while terminal-notice lookup is blocked and ignor
     wire(4, 'assistant/message', { turn: 7, message: { role: 'assistant', content: [{ type: 'text', text: 'complete' }] } }, 'append'),
     wire(5, 'turn/end', { turn: 7, reason: { kind: 'completed' } }));
   const bot = new DiscordBot(config, engine, undefined, true); Object.defineProperty(bot.client, 'isReady', { value: () => true });
-  let release!: (value: { id: string; send(options: unknown): Promise<{ id: string }> }) => void;
+  let release!: (value: { id: string; createDM(): Promise<{ send(options: unknown): Promise<{ id: string }> }> }) => void;
   let started!: () => void; const lookupStarted = new Promise<void>(resolve => { started = resolve; });
-  const lookup = new Promise<{ id: string; send(options: unknown): Promise<{ id: string }> }>(resolve => { release = resolve; });
+  const lookup = new Promise<{ id: string; createDM(): Promise<{ send(options: unknown): Promise<{ id: string }> }> }>(resolve => { release = resolve; });
   let sends = 0, destroys = 0;
   Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: () => { started(); return lookup; } });
   Object.defineProperty(bot.client, 'destroy', { configurable: true, value: async () => { destroys++; } });
@@ -204,7 +224,7 @@ test('actual tick stop returns while terminal-notice lookup is blocked and ignor
   const stopTask = bot.stop();
   const stoppedBeforeRelease = await Promise.race([stopTask.then(() => true), new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), 250); })]);
   if (deadline) clearTimeout(deadline);
-  release({ id: actor.userId, send: async () => { sends++; return { id: '55555555555555555' }; } });
+  release({ id: actor.userId, createDM: async () => ({ send: async () => { sends++; return { id: '55555555555555555' }; } }) });
   await stopTask; await new Promise<void>(resolve => setImmediate(resolve));
   (bot as unknown as { tick(): void }).tick();
   const run = store.get('working-run')!;
@@ -222,7 +242,7 @@ test('actual tick stop returns during terminal-notice send and keeps durable unk
   const sendStarted = new Promise<void>(resolve => { started = resolve; });
   const blockedSend = new Promise<{ id: string }>(resolve => { release = resolve; });
   let sends = 0, destroys = 0;
-  Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: async () => ({ id: actor.userId, send: () => { sends++; started(); return blockedSend; } }) });
+  Object.defineProperty(bot.client.users, 'fetch', { configurable: true, value: async () => ({ id: actor.userId, createDM: async () => ({ send: () => { sends++; started(); return blockedSend; } }) }) });
   Object.defineProperty(bot.client, 'destroy', { configurable: true, value: async () => { destroys++; } });
   t.after(() => bot.stop());
   (bot as unknown as { tick(): void }).tick(); await sendStarted;

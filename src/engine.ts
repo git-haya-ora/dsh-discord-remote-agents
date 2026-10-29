@@ -31,6 +31,17 @@ export class Engine {
     readonly protectedPayloadStore?: ProtectedPayloadStore, private readonly protectedIdentity?: ProtectedIdentity, readonly protectedOutputRequired = false,
     private readonly compactSignal?: AbortSignal | (() => AbortSignal), private readonly contextMetricsSignal?: AbortSignal) {
     store.recoverDispatches();
+    if (!store.metadataOnly && store.setting('legacy-discord-notification-fence-v1') !== '1') {
+      // Old pending rows cannot distinguish an unsent notification from a crash
+      // after send and before the old post-send write. Quarantine all of them.
+      // Mark completion only after every row is saved, so interruption is safe.
+      for (const run of store.allRuns()) {
+        if (run.guildId !== 'telegram' && terminal(run.state) && run.notification === 'pending') {
+          run.notification = 'unknown'; run.lastError = 'NOTIFICATION_UNKNOWN'; store.save(run);
+        }
+      }
+      store.setSetting('legacy-discord-notification-fence-v1', '1');
+    }
     const persistedFault = store.setting('protected-output-blocked');
     if (persistedFault) this.protectedOutputFault = /^[A-Z0-9_]{1,64}$/u.test(persistedFault) ? persistedFault : 'PROTECTED_OUTPUT_STATE_INVALID';
     if (protectedOutputRequired && (!store.metadataOnly || !protectedPayloadStore || !protectedIdentity)) this.blockProtectedOutput('PROTECTED_OUTPUT_UNAVAILABLE');
@@ -727,9 +738,10 @@ export class Engine {
       catch (error) {
         const code = errorCode(error); part.lastError = code; run.lastError = code;
         if (code === 'DELIVERY_RATE_LIMIT') {
-          const retryAfterMs = error && typeof error === 'object' && 'retryAfterMs' in error ? Number(error.retryAfterMs) : NaN;
-          if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
-            part.state = 'pending'; part.nextAttemptAt = Date.now() + Math.max(1, retryAfterMs); run.nextNotifyAt = part.nextAttemptAt; run.notification = 'pending';
+          const retryAfterMs = error && typeof error === 'object' && 'retryAfterMs' in error ? error.retryAfterMs : undefined;
+          const now = Date.now();
+          if (typeof retryAfterMs === 'number' && Number.isSafeInteger(retryAfterMs) && retryAfterMs > 0 && Number.isSafeInteger(now + retryAfterMs)) {
+            part.state = 'pending'; part.nextAttemptAt = now + retryAfterMs; run.nextNotifyAt = part.nextAttemptAt; run.notification = 'pending';
           } else { part.state = 'unknown'; run.notification = 'unknown'; }
         } else if (['DELIVERY_BLOCKED', 'DM_FAILED', 'NOT_AUTHORIZED', 'CWD_NOT_ALLOWED'].includes(code)) {
           part.state = 'blocked'; run.notification = 'none';
@@ -872,6 +884,26 @@ export class Engine {
           continue;
         }
         if (!this.policy.stillAuthorized(run.userId, run.guildId, run.channelId)) continue;
+        if (run.guildId !== 'telegram') {
+          // Legacy Discord has no per-part receipt or trustworthy way to resolve
+          // an uncertain send. Fence it durably before entering the network call.
+          try { await this.session(run.sessionId, run); await this.restoreBody(run); }
+          catch (error) {
+            run.notifyAttempts++; run.lastError = errorCode(error);
+            run.nextNotifyAt = Date.now() + Math.min(3600000, 10000 * 2 ** Math.min(run.notifyAttempts, 9));
+            this.store.save(run); continue;
+          }
+          run.notifyAttempts++; run.notification = 'unknown'; run.lastError = 'NOTIFICATION_UNKNOWN';
+          run.updatedAt = Date.now(); this.store.save(run);
+          try { await notify(structuredClone(run)); }
+          catch (error) {
+            // Even an apparent refusal is not proof that no message was sent by
+            // an arbitrary legacy notifier. Keep the durable unknown fence.
+            run.notification = 'unknown'; run.lastError = errorCode(error); this.store.save(run); continue;
+          }
+          run.notification = 'sent'; run.lastError = ''; this.store.save(run);
+          continue;
+        }
         let notificationAttempted = false;
         try {
           await this.session(run.sessionId, run); await this.restoreBody(run);

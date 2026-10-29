@@ -100,6 +100,13 @@ test('429 obeys explicit wait and preserves order across restart', async t => {
   const ready = reopened.store.get('run')!; ready.nextNotifyAt = 0; ready.delivery!.parts[0]!.nextAttemptAt = 0; reopened.store.save(ready);
   await reopened.engine.tick(async (_run, part) => ({ messageId: `sent-${part!.index}` })); assert.equal(reopened.store.get('run')!.notification, 'sent');
 });
+for (const retryAfterMs of [0, -1, NaN, Infinity, Number.MAX_SAFE_INTEGER, null, '100']) test(`untrusted 429 wait ${String(retryAfterMs)} remains unknown and never auto-retries`, async t => {
+  const { engine, store } = await setup(t, 'final'.repeat(800)); let calls = 0;
+  const notify: Notify = async () => { calls++; throw Object.assign(new AppError('DELIVERY_RATE_LIMIT', 'private'), { retryAfterMs }); };
+  await engine.tick(notify);
+  assert.equal(store.get('run')!.delivery!.parts[0]!.state, 'unknown');
+  await engine.tick(notify); assert.equal(calls, 1);
+});
 for (const code of ['DELIVERY_BLOCKED', 'DM_FAILED']) test(`${code} blocked, no automatic replay/fallback, manual retry never prompt`, async t => {
   const { engine, store, adapter } = await setup(t, 'final'.repeat(800)); let calls = 0;
   await engine.tick(async () => { calls++; throw new AppError(code, 'private'); });

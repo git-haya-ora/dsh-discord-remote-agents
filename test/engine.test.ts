@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import type { Config } from '../src/config.js';
 import { validateLocalUrl } from '../src/config.js';
 import { Policy } from '../src/policy.js';
@@ -130,13 +133,192 @@ test('explicit rejection fails, network failure does not advance cursor, cancel/
   await engine.tick(async () => {}); assert.equal(store.get('2')?.lastSeq, 0); adapter.readError = undefined;
   adapter.log = completed('discord:2', 1, 'aborted'); await engine.tick(async () => {}); assert.equal(store.get('2')?.state, 'interrupted');
 });
-test('DM failure retained, manual retry, revoked user receives no notification', async t => {
-  const { engine, adapter, store, config } = await setup(t); await engine.submit(actor, '1', 'hello'); adapter.log = completed('discord:1');
-  await engine.tick(async () => { throw new AppError('DM_FAILED', 'blocked'); });
-  assert.equal(store.get('1')?.notification, 'pending'); assert.equal(store.get('1')?.notifyAttempts, 1);
-  await engine.retryNotification(actor, '1'); config.allowedUserIds.delete(actor.userId);
-  await engine.tick(async () => assert.fail('revoked')); assert.equal(store.get('1')?.notification, 'pending');
-  config.allowedUserIds.add(actor.userId); await engine.tick(async () => {}); assert.equal(store.get('1')?.notification, 'sent');
+test('legacy Discord notifier errors remain unknown and cannot be retried', async t => {
+  const { engine, adapter, store } = await setup(t); await engine.submit(actor, '1', 'hello'); adapter.log = completed('discord:1');
+  await engine.tick(async () => { throw new AppError('DM_FAILED', 'ambiguous notifier failure'); });
+  assert.equal(store.get('1')?.notification, 'unknown'); assert.equal(store.get('1')?.notifyAttempts, 1);
+  await assert.rejects(engine.retryNotification(actor, '1', undefined, true), { code: 'NOTIFICATION_UNKNOWN' });
+  let sends = 0; await engine.tick(async () => { sends++; }); assert.equal(sends, 0);
+});
+
+test('legacy Discord notifier mutation cannot undo unknown fence after an ambiguous failure', async t => {
+  const { engine, adapter, store, config, policy } = await setup(t);
+  await engine.submit(actor, 'legacy-mutated', 'hello'); adapter.log = completed('discord:legacy-mutated');
+  let sends = 0;
+  await engine.tick(async run => {
+    sends++;
+    assert.equal(run.notification, 'unknown');
+    assert.equal(store.get(run.id)?.notification, 'unknown');
+    run.notification = 'pending';
+    throw new AppError('DM_FAILED', 'ambiguous notifier failure');
+  });
+  assert.equal(store.get('legacy-mutated')?.notification, 'unknown');
+  assert.equal(store.get('legacy-mutated')?.notifyAttempts, 1);
+  await engine.tick(async () => { sends++; });
+  assert.equal(sends, 1);
+  store.close();
+  const reopened = new Store(config.databasePath);
+  try {
+    const restored = new Engine(adapter, reopened, policy, [config.dshToken]);
+    assert.equal(reopened.get('legacy-mutated')?.notification, 'unknown');
+    assert.equal(reopened.get('legacy-mutated')?.notifyAttempts, 1);
+    await restored.tick(async () => { sends++; });
+    assert.equal(sends, 1);
+    assert.equal(reopened.get('legacy-mutated')?.notification, 'unknown');
+  } finally { reopened.close(); }
+});
+
+test('legacy Discord preflight failure permits manual retry without sending', async t => {
+  const { engine, adapter, store, config } = await setup(t);
+  adapter.promptError = new DshRejected('DSH_AUTH', 'rejected');
+  await engine.submit(actor, 'legacy-preflight', 'hello');
+  config.allowedUserIds.delete(actor.userId);
+  let sends = 0;
+  await engine.tick(async () => { sends++; });
+  assert.equal(sends, 0); assert.equal(store.get('legacy-preflight')?.notification, 'pending');
+  config.allowedUserIds.add(actor.userId);
+  adapter.rows = [];
+  await engine.tick(async () => { sends++; });
+  assert.equal(sends, 0); assert.equal(store.get('legacy-preflight')?.notification, 'pending');
+  adapter.rows = [{ sessionId: 'old', cwd: config.workspaces.test!, running: false, title: 'existing', updatedAt: 1, subagent: false }];
+  await engine.retryNotification(actor, 'legacy-preflight');
+  await engine.tick(async () => {});
+  assert.equal(store.get('legacy-preflight')?.notification, 'sent');
+});
+
+test('upgrade quarantines existing legacy Discord pending rows but not Telegram', async t => {
+  const { engine, adapter, store, config, policy } = await setup(t);
+  adapter.promptError = new DshRejected('DSH_AUTH', 'rejected');
+  await engine.submit(actor, 'old-pending', 'hello');
+  const pending = store.get('old-pending')!;
+  store.create({ ...pending, id: 'old-telegram', requestId: 'telegram:old-telegram', guildId: 'telegram' });
+  // Simulate a database produced before the migration marker existed.
+  store.clearSetting('legacy-discord-notification-fence-v1'); store.close();
+  const oldDb = new DatabaseSync(config.databasePath); oldDb.exec('PRAGMA user_version=1'); oldDb.close();
+  const reopened = new Store(config.databasePath);
+  try {
+    const telegramPolicy = await Policy.create({ ...config, guildId: 'telegram' });
+    const restored = new Engine(adapter, reopened, Policy.combine([policy, telegramPolicy]));
+    assert.equal(reopened.get('old-pending')?.notification, 'unknown');
+    assert.equal(reopened.get('old-telegram')?.notification, 'pending');
+    assert.equal(reopened.setting('legacy-discord-notification-fence-v1'), '1');
+    const sends: string[] = [];
+    await restored.tick(async run => { sends.push(run.guildId); throw new AppError('DM_FAILED', 'telegram failure'); });
+    assert.deepEqual(sends, ['telegram']);
+    assert.equal(reopened.get('old-telegram')?.notification, 'pending');
+    assert.equal(reopened.get('old-telegram')?.notifyAttempts, 1);
+    await restored.retryNotification({ ...actor, guildId: 'telegram' }, 'old-telegram');
+    await restored.tick(async run => { sends.push(run.guildId); });
+    assert.deepEqual(sends, ['telegram', 'telegram']);
+    assert.equal(reopened.get('old-telegram')?.notification, 'sent');
+    await assert.rejects(restored.retryNotification(actor, 'old-pending', undefined, true), { code: 'NOTIFICATION_UNKNOWN' });
+  } finally { reopened.close(); }
+});
+
+test('version fence precedes interrupted legacy migration and old version guard refuses downgrade', async t => {
+  const { engine, adapter, store, config, policy } = await setup(t);
+  adapter.promptError = new DshRejected('DSH_AUTH', 'rejected');
+  await engine.submit(actor, 'migration-crash', 'hello');
+  store.create({ ...store.get('migration-crash')!, id: 'migration-crash-2', requestId: 'discord:migration-crash-2' });
+  store.clearSetting('legacy-discord-notification-fence-v1'); store.close();
+  const oldDb = new DatabaseSync(config.databasePath); oldDb.exec('PRAGMA user_version=1'); oldDb.close();
+  const interrupted = new Store(config.databasePath);
+  const save = interrupted.save.bind(interrupted); let writes = 0;
+  interrupted.save = run => { if (++writes === 2) throw new Error('simulated migration interruption'); save(run); };
+  assert.throws(() => new Engine(adapter, interrupted, policy), /simulated migration interruption/);
+  assert.equal(interrupted.get('migration-crash')?.notification, 'unknown');
+  assert.equal(interrupted.get('migration-crash-2')?.notification, 'pending');
+  assert.equal(interrupted.setting('legacy-discord-notification-fence-v1'), undefined);
+  interrupted.save = save; interrupted.close();
+  const probe = new DatabaseSync(config.databasePath, { readOnly: true });
+  const version = probe.prepare('PRAGMA user_version').get()?.user_version;
+  probe.close();
+  // This is the exact version guard used by the previous Store implementation.
+  const oldVersionGuard = (): void => { if (version !== 0 && version !== 1) throw new AppError('DB_VERSION', 'unsupported'); };
+  assert.equal(version, 2); assert.throws(oldVersionGuard, { code: 'DB_VERSION' });
+  const recovered = new Store(config.databasePath);
+  try {
+    const restored = new Engine(adapter, recovered, policy);
+    assert.equal(recovered.get('migration-crash')?.notification, 'unknown');
+    assert.equal(recovered.get('migration-crash-2')?.notification, 'unknown');
+    assert.equal(recovered.setting('legacy-discord-notification-fence-v1'), '1');
+    let sends = 0; await restored.tick(async () => { sends++; }); assert.equal(sends, 0);
+  } finally { recovered.close(); }
+});
+
+test('restricted profile uses version 2 and cannot be opened as non-metadata', async t => {
+  const { store, config } = await setup(t, true); store.close();
+  const probe = new DatabaseSync(config.databasePath, { readOnly: true });
+  assert.equal(probe.prepare('PRAGMA user_version').get()?.user_version, 2); probe.close();
+  assert.throws(() => new Store(config.databasePath), { code: 'PROFILE_CONFLICT' });
+  const reopened = new Store(config.databasePath, true);
+  assert.equal(reopened.setting('restricted-storage-profile'), 'single-operator-text-v1'); reopened.close();
+  const after = new DatabaseSync(config.databasePath, { readOnly: true });
+  assert.equal(after.prepare('PRAGMA user_version').get()?.user_version, 2); after.close();
+});
+
+test('verified version 1 restricted profile migrates and fences the old Store guard', async t => {
+  const { store, config, engine } = await setup(t, true);
+  await engine.submit(actor, 'restricted-migration', 'private prompt');
+  store.close();
+  const legacy = new DatabaseSync(config.databasePath);
+  legacy.exec('PRAGMA user_version=1'); legacy.close();
+  const migrated = new Store(config.databasePath, true);
+  assert.equal(migrated.setting('restricted-storage-profile'), 'single-operator-text-v1');
+  assert.equal(migrated.get('restricted-migration')?.state, 'accepted');
+  assert.equal(migrated.get('restricted-migration')?.bodyMissing, true);
+  migrated.close();
+  const probe = new DatabaseSync(config.databasePath, { readOnly: true });
+  const version = probe.prepare('PRAGMA user_version').get()?.user_version;
+  assert.equal(probe.prepare('SELECT value FROM settings WHERE key=?').get('restricted-storage-profile')?.value, 'single-operator-text-v1');
+  probe.close();
+  const oldVersionGuard = (): void => { if (version !== 0 && version !== 1) throw new AppError('DB_VERSION', 'unsupported'); };
+  assert.equal(version, 2); assert.throws(oldVersionGuard, { code: 'DB_VERSION' });
+  assert.throws(() => new Store(config.databasePath), { code: 'PROFILE_CONFLICT' });
+  const reopened = new Store(config.databasePath, true);
+  try {
+    assert.equal(reopened.setting('restricted-storage-profile'), 'single-operator-text-v1');
+    assert.equal(reopened.get('restricted-migration')?.state, 'accepted');
+  } finally { reopened.close(); }
+});
+
+test('legacy Discord durable unknown survives interruption during send', async t => {
+  const { engine, adapter, store, config, policy } = await setup(t);
+  await engine.submit(actor, 'legacy-crash', 'hello'); adapter.log = completed('discord:legacy-crash');
+  let resume!: () => void; let reached!: () => void;
+  const during = new Promise<void>(resolve => { reached = resolve; });
+  const hold = new Promise<void>(resolve => { resume = resolve; });
+  let sends = 0;
+  const interrupted = engine.tick(async run => {
+    sends++; assert.equal(run.notification, 'unknown');
+    assert.equal(store.get(run.id)?.notification, 'unknown');
+    store.close(); reached(); await hold;
+  });
+  const stopped = assert.rejects(interrupted);
+  await during;
+  const reopened = new Store(config.databasePath);
+  try {
+    const restored = new Engine(adapter, reopened, policy, [config.dshToken]);
+    assert.equal(reopened.get('legacy-crash')?.notification, 'unknown');
+    assert.equal(reopened.get('legacy-crash')?.notifyAttempts, 1);
+    await restored.tick(async () => { sends++; });
+    await assert.rejects(restored.retryNotification(actor, 'legacy-crash', undefined, true), { code: 'NOTIFICATION_UNKNOWN' });
+    assert.equal(sends, 1);
+  } finally { reopened.close(); resume(); await stopped; }
+});
+
+test('legacy Discord fence failure prevents send and receipt persistence failure prevents replay', async t => {
+  const { engine, adapter, store } = await setup(t);
+  await engine.submit(actor, 'legacy-writes', 'hello'); adapter.log = completed('discord:legacy-writes');
+  const save = store.save.bind(store); let failState = 'unknown'; let sends = 0;
+  store.save = run => { if (run.notification === failState) throw new Error('injected write failure'); save(run); };
+  await assert.rejects(engine.tick(async () => { sends++; }), /injected write failure/);
+  assert.equal(sends, 0); assert.equal(store.get('legacy-writes')?.notification, 'pending');
+  failState = 'sent';
+  await assert.rejects(engine.tick(async () => { sends++; }), /injected write failure/);
+  assert.equal(sends, 1); assert.equal(store.get('legacy-writes')?.notification, 'unknown');
+  store.save = save;
+  await engine.tick(async () => { sends++; }); assert.equal(sends, 1);
 });
 test('restart recovery marks dispatching unknown without prompt replay; SQLite excludes second process', async t => {
   const { engine, adapter, store, config } = await setup(t); const run = await engine.submit(actor, '1', 'hello'); run.state = 'dispatching'; store.save(run);
@@ -246,6 +428,26 @@ test('restricted definitive notification refusal remains eligible for explicit r
   await engine.retryNotification(actor, 'refused-notify');
   await engine.tick(async run => { assert.equal(run.notification, 'unknown'); return { messageId: '111111111111111111' }; });
   assert.equal(store.get('refused-notify')?.notification, 'sent'); assert.equal(adapter.promptCalls, 1);
+});
+test('restricted store refuses an unmarked database appearing at fresh-path reservation', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'discord-reservation-test-'));
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const path = join(dir, 'race.sqlite');
+  const original = fs.openSync; let created = false; let before: Buffer | undefined;
+  try {
+    fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+      if (!created && args[0] === path && args[1] === 'wx') {
+        created = true;
+        const other = new DatabaseSync(path);
+        other.exec("CREATE TABLE untouched (value TEXT); INSERT INTO untouched VALUES ('sentinel');");
+        other.close(); before = fs.readFileSync(path);
+      }
+      return original(...args);
+    }) as typeof fs.openSync;
+    syncBuiltinESMExports();
+    assert.throws(() => new Store(path, true), { code: 'PROFILE_CONFLICT' });
+  } finally { fs.openSync = original; syncBuiltinESMExports(); }
+  assert.equal(created, true); assert.deepEqual(await readFile(path), before);
 });
 test('restricted store rejects existing legacy and unrelated DB bytes unchanged before schema writes', async t => {
   const { store, config } = await setup(t); store.close();

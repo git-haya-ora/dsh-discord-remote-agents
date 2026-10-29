@@ -37,7 +37,7 @@ const manifest = JSON.parse(text('package.json'));
 // Only these manually invoked development commands are permitted; every npm lifecycle hook is denied.
 const developmentScripts = {
   build: 'tsc -p tsconfig.json && node scripts/build-plugin.mjs && node scripts/sync-distribution.mjs',
-  test: 'npm run build && node --test dist/test/*.test.js',
+  test: 'npm run build && node --test dist/test/*.test.js test/*.test.mjs',
   'pack:plugin': 'npm run build && npm pack --ignore-scripts',
   'verify:source': 'node tools/verify-public-source.mjs',
 };

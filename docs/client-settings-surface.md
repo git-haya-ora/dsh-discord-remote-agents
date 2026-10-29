@@ -21,7 +21,7 @@ Help a single authenticated DSH operator configure and explicitly start a Discor
 
 - Host status is the source of truth. Unknown/unavailable is not connected; an empty list or zero must not silently replace a failed request.
 - Show the single-operator/non-atomic constraints next to connection controls. Approval/cancel/attachments/artifacts are unavailable; instruct the user to use PC DSH.
-- Token input is password/write-only, local and transient. Empty means keep. Submission clears the field immediately, including on failure; unmount aborts every pending request and clears transient references. No clipboard automation, browser storage, logging or credential readback.
+- Token input is password/write-only, local and transient. Empty means keep. Save submission clears the field immediately, including on failure; the optional read-only token test retains the in-memory candidate so the user can save it without re-entry; unmount aborts every pending request and clears transient references. No clipboard automation, browser storage, logging or credential readback.
 - Save and start are distinct. Start/stop/reconnect are about the Discord receiver, not a DSH Run. Mark busy requests and prevent duplicate submissions.
 - Registration, deletion, start and reconnect require explicit confirmation. Autostart needs separate consent and only arms after a confirmed successful manual start at the saved revision; save/stop/delete disarm it. Saving or deleting a secret stops the receiver, not a Native Run. Revision conflicts require refresh/review rather than blind retry of mutations.
 - Nonsecret allowlists and workspace aliases are explicit, not inferred from local sessions or a token. Folder allowlisting is not an execution sandbox.

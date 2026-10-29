@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, existsSync, lstatSync } from 'node:fs';
+import { mkdirSync, existsSync, lstatSync, openSync, closeSync, fstatSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { AppError } from './errors.js';
 import { terminal } from './types.js';
@@ -53,7 +53,21 @@ export class Store {
   private readonly bodies = new Map<string, { output: string; result: string; finalText?: string | undefined }>();
   constructor(path: string, readonly metadataOnly = false) {
     this.databasePath = path;
-    if (metadataOnly && path !== ':memory:' && existsSync(path)) {
+    let verifyExistingProfile = false;
+    let reservedIdentity: { dev: number; ino: number } | undefined;
+    if (metadataOnly && path !== ':memory:') {
+      // Reserve a new path atomically; an existing path is never claimed.
+      mkdirSync(dirname(path), { recursive: true });
+      try {
+        const fd = openSync(path, 'wx');
+        try { const stat = fstatSync(fd); reservedIdentity = { dev: stat.dev, ino: stat.ino }; }
+        finally { closeSync(fd); }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        verifyExistingProfile = true;
+      }
+    }
+    if (verifyExistingProfile) {
       // Never claim, migrate or even configure an existing unmarked database.
       // Read-only validation MUST precede all PRAGMAs/schema writes.
       const stat = lstatSync(path);
@@ -63,7 +77,7 @@ export class Store {
         probe = new DatabaseSync(path, { readOnly: true });
         const version = probe.prepare('PRAGMA user_version').get()?.user_version;
         const marker = probe.prepare('SELECT value FROM settings WHERE key=?').get('restricted-storage-profile')?.value;
-        if (version !== 1 || marker !== 'single-operator-text-v1') throw new Error('Profile mismatch');
+        if ((version !== 1 && version !== 2) || marker !== 'single-operator-text-v1') throw new Error('Profile mismatch');
         for (const table of ['runs', 'bindings', 'receipts']) probe.prepare(`SELECT * FROM ${table} LIMIT 0`).all();
       } catch { throw new AppError('PROFILE_CONFLICT', '既存データベースの専用プロファイルを確認できません。移行は行いません。'); }
       finally { probe?.close(); }
@@ -72,9 +86,33 @@ export class Store {
     this.db = new DatabaseSync(path);
     try {
       // One process per database, enforced by SQLite rather than a stale PID file.
-      this.db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA locking_mode=EXCLUSIVE; PRAGMA busy_timeout=1000; PRAGMA temp_store=MEMORY; BEGIN EXCLUSIVE; COMMIT;');
+      this.db.exec('PRAGMA locking_mode=EXCLUSIVE; PRAGMA busy_timeout=1000; BEGIN EXCLUSIVE; COMMIT;');
       const version = this.db.prepare('PRAGMA user_version').get()?.user_version;
-      if (version !== 0 && version !== 1) throw new AppError('DB_VERSION', 'このデータベースは未対応バージョンです。');
+      if (reservedIdentity) {
+        const stat = lstatSync(path);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.dev !== reservedIdentity.dev || stat.ino !== reservedIdentity.ino
+          || version !== 0 || this.db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get())
+          throw new AppError('PROFILE_CONFLICT', '新規データベースを安全に確認できません。');
+      }
+      if (verifyExistingProfile) {
+        // Recheck under the exclusive lock: the read-only probe is not a lock.
+        try {
+          const marker = this.db.prepare('SELECT value FROM settings WHERE key=?').get('restricted-storage-profile')?.value;
+          if ((version !== 1 && version !== 2) || marker !== 'single-operator-text-v1') throw new Error('Profile mismatch');
+          for (const table of ['runs', 'bindings', 'receipts']) this.db.prepare(`SELECT * FROM ${table} LIMIT 0`).all();
+        } catch { throw new AppError('PROFILE_CONFLICT', '既存データベースの専用プロファイルを確認できません。移行は行いません。'); }
+      }
+      if (version !== 0 && version !== 1 && version !== 2) throw new AppError('DB_VERSION', 'このデータベースは未対応バージョンです。');
+      if (!metadataOnly) {
+        const settingsExist = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").get();
+        if (settingsExist && this.db.prepare('SELECT value FROM settings WHERE key=?').get('restricted-storage-profile'))
+          throw new AppError('PROFILE_CONFLICT', '専用プロファイルのデータベースを通常モードで開けません。');
+      }
+      // Fence older binaries before schema or row writes and Engine recovery.
+      // Existing verified profiles can reopen after a crash. A fresh reservation
+      // interrupted before the Host writes its marker fails closed on reopening.
+      if (version !== 2) this.db.exec('PRAGMA user_version=2;');
+      this.db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY;');
       this.db.exec(`CREATE TABLE IF NOT EXISTS bindings (key TEXT PRIMARY KEY, session_id TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS receipts (key TEXT PRIMARY KEY);
@@ -85,7 +123,7 @@ export class Store {
          CREATE INDEX IF NOT EXISTS compact_intents_session ON compact_intents(session_id,dispatched_at);
          CREATE UNIQUE INDEX IF NOT EXISTS one_unknown_compact_per_session ON compact_intents(session_id) WHERE state='unknown';
         CREATE UNIQUE INDEX IF NOT EXISTS one_active_run ON runs(session_id) WHERE state IN ('dispatching','accepted','running','unknown');
-        PRAGMA user_version=1;`);
+        PRAGMA user_version=2;`);
     } catch (error) {
       this.db.close();
       if (error instanceof AppError) throw error;
