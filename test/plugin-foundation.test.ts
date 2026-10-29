@@ -30,6 +30,8 @@ test('unconfigured foundation never starts receivers or declares unverified capa
   assert.equal(status.state, 'unconfigured');
   assert.equal(status.receiverStarted, false);
   assert.equal(status.nativeRunsTouched, false);
+  assert.equal(status.inspectedDshVersion, '0.2.1-rc.3');
+  assert.equal('supportedDshVersion' in status, false);
   assert.equal(status.compatibility, 'unverified');
   assert.ok(Object.values(status.capabilities).every(value => value.supported === false));
   assert.ok(Object.isFrozen(status.capabilities));

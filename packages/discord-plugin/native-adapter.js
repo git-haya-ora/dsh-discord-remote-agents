@@ -188,6 +188,9 @@ export class NativeSessionAdapter {
     const value = await this.call('projections', { sessionId });
     if (value === null) throw new DshRejected('SESSION_NOT_FOUND', 'DSHセッションが見つかりません。');
     const data = object(value);
+    if (data.kind === 'migration-required') {
+      throw new AppError('DSH_MIGRATION_REQUIRED', 'このDSHセッションは履歴移行待ちです。PCのDSHで開いて移行を完了してください。移行完了までDiscordから履歴の読取り・送信は行いません。');
+    }
     if (!Number.isSafeInteger(data.asOfSeq) || data.asOfSeq < -1 || !data.values || typeof data.values !== 'object' || Array.isArray(data.values)) protocol();
     return { cursor: data.asOfSeq, values: object(data.values) };
   }

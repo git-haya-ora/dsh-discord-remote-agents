@@ -166,6 +166,8 @@ DSH Host内部の正式契約を優先する。同一Hostの操作のためDSH_T
 
 初版作成時にはDSH実装ソースを通常のディレクトリとして参照できず、具体APIは未検証だった。その後、インストール済みASAR内のDSH `0.2.0-rc.2`の資料と実装を読み取り調査し、Cookie認証、named-argument RPC、session一覧・作成・prompt・projections・pageをMVPへ実装した。これは対象版の内部接続契約の調査であり、安定した公開APIや他バージョンとの互換性を保証しない。
 
+2026-10-30にインストール済みDSH `0.2.1-rc.3`／Cordis `4.0.5`を追加で読み取り調査した。正式Pluginが使う`sessionController.projections({sessionId})`は通常 `{kind: "sequenced", asOfSeq, values}`、履歴移行待ちは `{kind: "migration-required", values}`を返し得る。移行待ち応答のcached hintsはcursorや現在状態として採用せず、Plugin Adapterは`DSH_MIGRATION_REQUIRED`で停止し、PC側での移行を案内する。契約テスト用Cordisも`4.0.5`に揃えた。これは静的調査とmock testであり、実DSH／Discord接続成功や全API互換性を認定するものではない。
+
 モック試験と未認証実ホストの401拒否は確認済みだが、実トークンによる一覧、PC→Bot→PCの同一セッション往復、承認・中断・ファイルの実機検証は未完了。[接続契約](<docs/dsh-connection.md>)と[検証記録](<docs/verification.md>)を証拠として参照する。P0全体を完了とはしない。DSHプラグイン拡張資料の調査範囲と未検証事項は第21章に示す。
 
 **DSH Web GUIが存在することと、外部Botから利用できる安定したAPIが存在することは別である。** GUIのURLやポート番号を、正式な外部連携契約として固定しない。

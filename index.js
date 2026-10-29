@@ -27,7 +27,7 @@ export class FoundationHost {
   }
   status() {
     return Object.freeze({ contractVersion: 1, state: this.#state, receiverStarted: false,
-      nativeRunsTouched: false, supportedDshVersion: '0.2.0-rc.2', compatibility: 'unverified',
+      nativeRunsTouched: false, inspectedDshVersion: '0.2.1-rc.3', compatibility: 'unverified',
       reasons, capabilities });
   }
   async dispatch(_request) {

@@ -2,7 +2,7 @@
 
 This preserved legacy implementation guide is not the supported plugin setup path. Use [restricted installation](<restricted-installation.md>). No legacy token/CLI procedure is required for GitHub plugin installation.
 
-> **互換性の再検証が必要（2026-10-13）**：以下は既存CLI Adapterの実装・過去調査を記録したものです。今回のインストール済みASAR調査ではRPC envelopeとの差異が指摘されています。モック試験の成功や版番号の一致だけで現行DSHとの互換性を保証しません。[P0判断記録](<p0-decisions.md>)に根拠と再検証ゲートを記録し、CLIの実サービス対応も確認するまで未検証として扱います。
+> **互換性の再検証が必要（2026-10-13）**：以下は既存CLI Adapterの実装・過去調査を記録したものです。2026-10-30のインストール済みDSH `0.2.1-rc.3`（Cordis `4.0.5`）の読み取り調査でも、CLIのRPC envelope差異は解消していません。モック試験の成功や版番号の一致だけで現行DSHとの互換性を保証しません。[P0判断記録](<p0-decisions.md>)に根拠と再検証ゲートを記録し、CLIの実サービス対応も確認するまで未検証として扱います。これは正式PluginのNative Session Adapterに対する別途の読み取り調査であり、CLI互換性を示しません。
 
 ## 対象
 

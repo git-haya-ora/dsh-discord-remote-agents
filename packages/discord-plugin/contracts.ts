@@ -75,7 +75,7 @@ export interface FoundationStatus {
   state: 'unconfigured' | 'blocked' | 'disposed';
   receiverStarted: false;
   nativeRunsTouched: false;
-  supportedDshVersion: '0.2.0-rc.2';
+  inspectedDshVersion: '0.2.1-rc.3';
   compatibility: 'unverified';
   reasons: readonly string[];
   capabilities: Readonly<Record<CapabilityName, { supported: false; reason: string }>>;

@@ -6,7 +6,7 @@
 
 ## 1. 事前条件と禁止事項
 
-- Windowsの同じ利用者アカウントでDSHを動かす。今回の契約調査対象はDSH `0.2.0-rc.2`。別versionへの自動互換宣言はしない。
+- Windowsの同じ利用者アカウントでDSHを動かす。過去の契約調査対象はDSH `0.2.0-rc.2`、2026-10-30の追加読み取り調査対象はインストール済みDSH `0.2.1-rc.3`（Cordis `4.0.5`）。追加調査は実機互換性の確認ではなく、別versionへの自動互換宣言はしない。
 - Node `>=22.23.0` が必要。SQLiteはNode内蔵を使う。コード・資料・模擬テストは安定Run receiptや原子的受付の代わりにならない。
 - DSH認証GUIを利用する相手は全員、同じplugin管理権限を持つ。operatorを共有する環境に独立owner/admin分離はない。
 - 同一SessionをPCとDiscordで同時に操作しない。承認回答・停止・添付・ArtifactはPCのDSHで行う。workspace allowlistは実行サンドボックスではない。

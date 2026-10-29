@@ -8,7 +8,7 @@ function fixture(overrides: Record<string, (...args: unknown[]) => unknown> = {}
   const controller = {
     async list(...args: unknown[]) { calls.push({ method: 'list', args }); return { items: [{ sessionId: 'native-session', cwd: '/synthetic/project', running: false, updatedAt: 1, projections: { values: { title: 'synthetic' } } }] }; },
     async create(...args: unknown[]) { calls.push({ method: 'create', args }); return { sessionId: 'created' }; },
-    async projections(...args: unknown[]) { calls.push({ method: 'projections', args }); return { asOfSeq: -1, values: { inbox: { 'next-turn': [], 'next-step': [] } } }; },
+    async projections(...args: unknown[]) { calls.push({ method: 'projections', args }); return { kind: 'sequenced', asOfSeq: -1, values: { inbox: { 'next-turn': [], 'next-step': [] } } }; },
     async page(...args: unknown[]) { calls.push({ method: 'page', args }); return { records: [], hasMore: false }; },
     async prompt(...args: unknown[]) { calls.push({ method: 'prompt', args }); return { accepted: true }; },
     async modelCatalog(...args: unknown[]) { calls.push({ method: 'modelCatalog', args }); return {
@@ -32,6 +32,35 @@ test('model catalog filters untrusted details and provider failure message befor
   assert.equal(JSON.stringify(catalog).includes('/synthetic/private'), false);
   assert.deepEqual(calls.map(call => call.method), ['modelCatalog']);
   assert.deepEqual(calls[0]!.args, []);
+});
+
+test('projection snapshot accepts the current sequenced response envelope', async () => {
+  const { adapter, calls } = fixture();
+  assert.deepEqual(await adapter.snapshot('native-session'), {
+    cursor: -1,
+    values: { inbox: { 'next-turn': [], 'next-step': [] } }
+  });
+  assert.deepEqual(calls.map(call => call.method), ['projections']);
+  assert.deepEqual(calls[0]!.args[0], { sessionId: 'native-session' });
+});
+
+test('migration-required projections fail closed with a distinct safe error and never expose cached hints', async () => {
+  const cachedHint = 'PRIVATE_CACHED_PROJECTION_HINT';
+  const { adapter, calls } = fixture({
+    async projections(...args: unknown[]) {
+      calls.push({ method: 'projections', args });
+      return { kind: 'migration-required', values: { title: cachedHint, inbox: { 'next-turn': [], 'next-step': [] } } };
+    }
+  });
+  await assert.rejects(adapter.snapshot('native-session'), error => {
+    const failure = error as { code?: unknown; message?: unknown };
+    assert.equal(failure.code, 'DSH_MIGRATION_REQUIRED');
+    assert.match(String(failure.message), /履歴移行待ち/u);
+    assert.equal(String(failure.message).includes(cachedHint), false);
+    return true;
+  });
+  assert.deepEqual(calls.map(call => call.method), ['projections']);
+  assert.equal(calls.some(call => ['create', 'prompt', 'rename'].includes(call.method)), false);
 });
 
 test('Native profile probe is read-only, exact-session-scoped and accepts only modern empty records envelope', async () => {

@@ -7,6 +7,7 @@ import type { ChatInputCommandInteraction } from 'discord.js';
 import type { Config } from '../src/config.js';
 import { command } from '../src/commands.js';
 import { handleAgentCommand } from '../src/command-handler.js';
+import { AppError } from '../src/errors.js';
 import { Engine, type Actor } from '../src/engine.js';
 import { Policy } from '../src/policy.js';
 import { Store } from '../src/store.js';
@@ -25,6 +26,7 @@ class CommandAdapter implements AgentAdapter {
   eventCalls = 0;
   promptCalls = 0;
   historyCalls = 0;
+  snapshotFailure: Error | undefined;
   history: ((sessionId: string, throughSeq: number, afterSeq: number) => Promise<SafeHistoryEntry[]>) | undefined;
 
   async list(): Promise<SessionInfo[]> { this.listCalls++; return this.rows; }
@@ -35,6 +37,7 @@ class CommandAdapter implements AgentAdapter {
   }
   async snapshot(_sessionId: string): Promise<Snapshot> {
     this.snapshotCalls++;
+    if (this.snapshotFailure) throw this.snapshotFailure;
     return { cursor: this.cursor, values: { inbox: { 'next-turn': [], 'next-step': [] } } };
   }
   async events(_sessionId: string, throughSeq: number, afterSeq: number): Promise<WireEvent[]> {
@@ -212,6 +215,19 @@ test('current, workspace alias, and task views show only authorized summary fiel
   assert.match(tasks.content, /run-task-1/u);
   assert.match(tasks.content, /受付済み/u);
   assert.match(tasks.content, /Session old-session-id/u);
+});
+
+test('migration-required snapshot is explained and prevents current-state claims or prompt submission', async t => {
+  const { engine, config, adapter } = await setup(t);
+  adapter.snapshotFailure = new AppError('DSH_MIGRATION_REQUIRED', 'safe synthetic migration message');
+
+  const current = await handleAgentCommand(interaction('current'), engine, config, true);
+  assert.match(current.content, /履歴移行待ち（PCのDSHでこのSessionを開いて移行してください）/u);
+  assert.doesNotMatch(current.content, /待機を観測/u);
+
+  await assert.rejects(engine.submit(actor, 'migration-request', 'synthetic instruction'), { code: 'DSH_MIGRATION_REQUIRED' });
+  assert.equal(adapter.promptCalls, 0);
+  assert.equal(engine.store.allRuns().some(run => run.id === 'migration-request'), false);
 });
 
 test('history is unregistered and injected invocations fail before snapshot/page/events', async t => {

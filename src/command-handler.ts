@@ -410,8 +410,10 @@ export async function handleAgentCommand(
           lastUsedModel = projectedModel(values.lastUsed);
           nextModel = projectedModel(values.next);
         }
-      } catch {
-        busy = session.running ? '実行中（Native list）・queue状態は不明' : '不明（snapshot取得不可）';
+      } catch (error) {
+        busy = errorCode(error) === 'DSH_MIGRATION_REQUIRED'
+          ? '履歴移行待ち（PCのDSHでこのSessionを開いて移行してください）'
+          : session.running ? '実行中（Native list）・queue状態は不明' : '不明（snapshot取得不可）';
       }
       session = await revalidateCurrentSession(engine, actor, sessionId, bindingVersion);
       if (session.running) busy = '実行中（再検証後の最新Native list観測）';
